@@ -124,6 +124,6 @@ export function App() {
       <section className="faq-section section-shell" aria-labelledby="faq-heading"><div><span className="eyebrow">A FEW THINGS TO KNOW</span><h2 id="faq-heading">Good questions.</h2></div><div className="faq-list">{questions.map(([question, answer]) => <details key={question}><summary>{question}<ChevronDown size={19} aria-hidden="true" /></summary><p>{answer}</p></details>)}</div></section>
     </main>
 
-    <footer className="site-footer section-shell"><a className="wordmark footer-wordmark" href="#" aria-label="Brr home">Brr<span className="wordmark-dot" aria-hidden="true" /></a><p>A little brr. A lot of possibility.</p><nav aria-label="Project information"><a href={publicUrl('LICENSE.txt')}>License</a><a href={publicUrl('NOTICE.txt')}>Notices</a><a href={publicUrl('GOVERNANCE.md')}>Governance</a><a href="#get-brr">Get Brr <ArrowRight size={14} aria-hidden="true" /></a></nav><span className="footer-year">© {new Date().getFullYear()} Brr contributors</span></footer>
+    <footer className="site-footer section-shell"><a className="wordmark footer-wordmark" href="#" aria-label="Brr home">Brr<span className="wordmark-dot" aria-hidden="true" /></a><p>agnets go Brr!</p><nav aria-label="Project information"><a href={publicUrl('LICENSE.txt')}>License</a><a href={publicUrl('NOTICE.txt')}>Notices</a><a href={publicUrl('GOVERNANCE.md')}>Governance</a><a href="#get-brr">Get Brr <ArrowRight size={14} aria-hidden="true" /></a></nav><span className="footer-year">© {new Date().getFullYear()} Brr contributors</span></footer>
   </>
 }

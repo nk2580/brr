@@ -28,6 +28,11 @@ The first runtime build downloads and compiles a large Rust workspace and
 checksum-verified V8 artifacts. Choose a local project folder, sign in with
 ChatGPT, select a model available to your account and start a conversation.
 
+New conversations currently use isolated Git worktrees. Install
+[Worktrunk](https://worktrunk.dev/) so `wt` is on PATH, and choose a Git project
+with at least one commit. This requirement also applies to note or writing
+projects. Existing legacy conversations retain their saved project directory.
+
 To create a local app bundle with ad-hoc signing:
 
 ```sh

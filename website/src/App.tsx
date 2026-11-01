@@ -57,6 +57,7 @@ function BuildGuide() {
     <div className="build-guide">
       <p className="build-step-label">FROM AN EXTRACTED BRR SOURCE FOLDER</p>
       <p>Install Node.js 22+, pnpm 10, stable Rust and the <a href="https://v2.tauri.app/start/prerequisites/" target="_blank" rel="noreferrer">macOS Tauri prerequisites<span className="sr-only"> (opens in a new tab)</span></a>.</p>
+      <p>New conversations currently need a Git project with a commit and <a href="https://worktrunk.dev/" target="_blank" rel="noreferrer">Worktrunk<span className="sr-only"> (opens in a new tab)</span></a> available as <code>wt</code>.</p>
       <div className="build-tabs" role="tablist" aria-label="Build options">
         {modes.map((value, index) => <button key={value} ref={element => { tabs.current[index] = element }} type="button" role="tab" id={`build-tab-${value}`} aria-controls="build-command-panel" aria-selected={mode === value} tabIndex={mode === value ? 0 : -1} onClick={() => chooseMode(value)} onKeyDown={event => onKeyDown(event, index)}>{value === 'develop' ? 'Run in development' : 'Package the app'}</button>)}
       </div>
@@ -76,7 +77,7 @@ const questions = [
   ['How can I extend it?', 'The owned runtime includes skills and MCP tool support. Skills describe reusable workflows; MCP connects tools. Configuration is currently manual, and Brr does not yet have an in-app extension marketplace. You can also change the Apache-licensed harness source.'],
   ['What does community-owned mean here?', 'You can inspect the source, modify it, redistribute it under Apache 2.0, and propose changes. Brr is early and maintainer-led today. An open contribution process gives the community a way to shape its direction; there is no foundation or elected governance body.'],
   ['Does everything stay on my computer?', 'Your project tools run locally and Brr stores conversation history in its private application-data folder. Model inference is sent to OpenAI using your ChatGPT sign-in. Brr is not an offline model, and connected tools may send data to their configured services.'],
-  ['Which accounts and platforms are supported?', 'The verified desktop build is macOS and uses ChatGPT sign-in only. Brr does not accept API keys or alternate model providers. A public, notarized app download is not available yet; start with the source build above.'],
+  ['Which accounts and platforms are supported?', 'The desktop source targets macOS and uses ChatGPT sign-in only. New conversations currently require a Git project with a commit and Worktrunk installed. Brr does not accept API keys or alternate model providers. A public, notarized app download is not available yet; start with the source build above.'],
 ]
 
 export function App() {
@@ -101,7 +102,7 @@ export function App() {
       </section>
 
       <section className="possibilities section-shell" id="possibilities" aria-labelledby="possibilities-heading">
-        <div className="section-intro"><div><span className="eyebrow">A FEW DIRECTIONS TO TAKE IT</span><h2 id="possibilities-heading">Research it. Write it.<br />Make it happen.</h2></div><p>Start with a folder and an idea. Make a plan together, add a new direction, and see what changes.</p></div>
+        <div className="section-intro"><div><span className="eyebrow">A FEW DIRECTIONS TO TAKE IT</span><h2 id="possibilities-heading">Research it. Write it.<br />Make it happen.</h2></div><p>Start with a project and an idea. Make a plan together, add a new direction, and see what changes.</p></div>
         <WorkflowTour />
         <div className="control-notes"><p><SlidersHorizontal size={18} aria-hidden="true" /><span>Plan first.<br /><strong>Then decide to move.</strong></span></p><p><ShieldCheck size={18} aria-hidden="true" /><span>Stay in the loop.<br /><strong>Steer, review, or stop.</strong></span></p><p><FolderOpen size={18} aria-hidden="true" /><span>Keep your context.<br /><strong>Pick up the conversation.</strong></span></p></div>
       </section>

@@ -98,7 +98,7 @@ export function App() {
           <div className="hero-actions"><a className="button button-light" href="#possibilities">Explore Brr <ArrowDown size={17} aria-hidden="true" /></a><a className="text-link" href="#extend">Make it yours <ArrowRight size={17} aria-hidden="true" /></a></div>
           <p className="hero-footnote">Your project. Your tools. Your direction.</p>
         </div>
-        <div className="hero-art" aria-hidden="true"><img src="/assets/agents-go-brr.webp" srcSet="/assets/agents-go-brr-small.webp 768w, /assets/agents-go-brr.webp 1536w" sizes="(min-width: 900px) 65vw, 110vw" width="1536" height="1024" alt="" fetchPriority="high" /></div>
+        <div className="hero-art" aria-hidden="true"><img src="/assets/rainbow-wood-chevrons.webp" srcSet="/assets/rainbow-wood-chevrons-small.webp 768w, /assets/rainbow-wood-chevrons.webp 1536w" sizes="(min-width: 900px) 65vw, 110vw" width="1536" height="1024" alt="" fetchPriority="high" /></div>
       </section>
 
       <section className="possibilities section-shell" id="possibilities" aria-labelledby="possibilities-heading">

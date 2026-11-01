@@ -104,19 +104,19 @@ access and inference require the desktop app.
 
 ## Marketing website
 
-The standalone React, TypeScript and Vite website lives in [`website`](website).
-Prepare its source download from this parent checkout before building it:
+The standalone React, TypeScript and Vite website lives in [`website`](website)
+and is hosted at https://nk2580.github.io/brr/.
 
 ```sh
-node scripts/prepare-source-release.mjs
-mkdir -p website/public/downloads
-cp .cache/releases/brr-source.tar.gz website/public/downloads/
 pnpm --dir website install
 pnpm --dir website dev
 pnpm --dir website test
 pnpm --dir website build
 ```
 
+Open the `/brr/` URL printed by Vite. Publish a tested website with
+`pnpm --dir website pages:deploy`; GitHub Pages serves the resulting `gh-pages`
+branch. See the [website guide](website/README.md) for publishing details.
 Its interactive tour is illustrative and does not start an agent.
 
 ## License

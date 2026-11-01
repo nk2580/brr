@@ -4,6 +4,24 @@ import { describe, expect, it, vi } from 'vitest'
 import { App } from './App'
 
 describe('Brr marketing page', () => {
+  it('serves artwork and project documents from the GitHub Pages base path', () => {
+    render(<App />)
+    const heroArt = document.querySelector<HTMLImageElement>('.hero-art img')
+    const extensionArt = document.querySelector<HTMLImageElement>('.extend-art')
+    expect(heroArt).toHaveAttribute('src', '/brr/assets/rainbow-wood-chevrons.webp')
+    expect(heroArt).toHaveAttribute('srcset', '/brr/assets/rainbow-wood-chevrons-small.webp 768w, /brr/assets/rainbow-wood-chevrons.webp 1536w')
+    expect(extensionArt).toHaveAttribute('src', '/brr/assets/extensible-harness.webp')
+    expect(extensionArt).toHaveAttribute('srcset', '/brr/assets/extensible-harness-small.webp 480w, /brr/assets/extensible-harness.webp 960w')
+    const localDocumentLinks = Array.from(document.querySelectorAll<HTMLAnchorElement>('a[href]'))
+      .map(link => link.getAttribute('href'))
+      .filter((href): href is string => href !== null && /\.(?:md|txt)$/.test(href))
+    expect(localDocumentLinks).toEqual([
+      '/brr/CONTRIBUTING.md', '/brr/UPSTREAM.md', '/brr/LICENSE.txt', '/brr/NOTICE.txt', '/brr/GOVERNANCE.md',
+    ])
+    expect(screen.getByRole('link', { name: 'Download source' })).toHaveAttribute('href', 'https://github.com/nk2580/brr/releases/download/v0.1.0/brr-source.tar.gz')
+    expect(screen.getByRole('link', { name: 'Possibilities' })).toHaveAttribute('href', '#possibilities')
+  })
+
   it('gives a broad audience a working path from possibilities to source and build instructions', () => {
     render(<App />)
     expect(screen.getByRole('heading', { level: 1, name: /Your work. Your way./ })).toBeInTheDocument()

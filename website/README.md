@@ -10,17 +10,25 @@ needed. The interactive tour is illustrative and does not run an agent.
 documents are copies of the root project's license, notices, contribution
 guide, governance and runtime provenance. Refresh them if those sources change.
 
-The source download in `public/downloads/` is built from the parent Brr checkout
-with `node scripts/prepare-source-release.mjs`, then copied from
-`.cache/releases/brr-source.tar.gz`. It is excluded from its own source archive.
-Build that archive again after source changes before deploying. Source archives
-exclude their own download file. In a Brr source checkout, prepare it with:
+The production website is hosted at https://nk2580.github.io/brr/.
+Vite uses `/brr/` as its base path, including during local development and
+preview. Open the `/brr/` URL printed by Vite.
+
+GitHub Pages publishes the `gh-pages` branch from its root directory. To
+publish an update from a reviewed source checkout with GitHub push access:
 
 ```sh
-node scripts/prepare-source-release.mjs
-mkdir -p website/public/downloads
-cp .cache/releases/brr-source.tar.gz website/public/downloads/
+pnpm install --frozen-lockfile
+pnpm test
+pnpm pages:deploy
 ```
 
-Run those commands from the parent Brr directory. A Sites website-source checkout
-already contains the prepared download and can build independently.
+Run these commands in `website/`. The deploy command builds `dist/` and uses
+the `gh-pages` package to publish only that output, including `.nojekyll`, to
+`https://github.com/nk2580/brr.git`. The repository URL is explicit so this
+also works in a standalone website checkout. Source changes belong on `main`;
+publish the built website separately with `pnpm pages:deploy`.
+
+The source download links directly to the versioned GitHub release asset.
+Website builds do not rebuild or modify that frozen release. The old Sites
+preview is not a deployment target; no Sites hosting manifest is retained.

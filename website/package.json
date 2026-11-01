@@ -8,6 +8,7 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 4173 --strictPort",
     "build": "tsc --noEmit && vite build",
+    "pages:deploy": "pnpm build && gh-pages -d dist -b gh-pages --repo https://github.com/nk2580/brr.git --nojekyll",
     "preview": "vite preview --host 127.0.0.1 --port 4173 --strictPort",
     "test": "vitest run"
   },
@@ -24,6 +25,7 @@
     "@types/react": "^19.1.13",
     "@types/react-dom": "^19.1.9",
     "@vitejs/plugin-react": "^4.7.0",
+    "gh-pages": "6.3.0",
     "jsdom": "^26.1.0",
     "typescript": "~5.9.2",
     "vite": "^6.3.6",

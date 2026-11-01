@@ -310,21 +310,6 @@ button:focus-visible,a:focus-visible,summary:focus-visible,textarea:focus-visibl
   mask-image:linear-gradient(to right,transparent,var(--ink) 8%,var(--ink) 92%,transparent);
 }
 
-.art-caption {
-  position:absolute;
-  bottom:11%;
-  right:9%;
-  color:var(--ink);
-  background:var(--lime);
-  border:1px solid var(--ink);
-  font-size:.6875rem;
-  letter-spacing:-.02em;
-  font-weight:750;
-  padding:.6rem .8rem;
-  transform:rotate(-7deg);
-  border-radius:3px
-}
-
 .possibilities {
   padding-block:3rem 4rem;
   scroll-margin-top:2rem
@@ -1219,10 +1204,6 @@ button:focus-visible,a:focus-visible,summary:focus-visible,textarea:focus-visibl
     font-size:.6875rem
   }
 
-  .art-caption {
-    font-size:.875rem
-  }
-
   .tour-example-badge {
     display:block
   }
@@ -1344,12 +1325,6 @@ button:focus-visible,a:focus-visible,summary:focus-visible,textarea:focus-visibl
 
   .hero-actions {
     gap:1.5rem
-  }
-
-  .art-caption {
-    right:14%;
-    bottom:8%;
-    font-size:.6875rem
   }
 
   .possibilities {
@@ -1624,10 +1599,6 @@ button:focus-visible,a:focus-visible,summary:focus-visible,textarea:focus-visibl
 
   .tour-feedback {
     padding-left:5rem
-  }
-
-  .art-caption {
-    right:16%
   }
 
 }

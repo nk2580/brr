@@ -1,0 +1,11 @@
+# Rainbow Operator
+
+The user explicitly confirmed the Rainbow Operator brief and delegated final visual choice, then steered the artwork toward 'agents go brr!'. The physical scene is a curious maker exploring a new tool at an evening desk: an ink-dark stage keeps the product legible while a full-spectrum swarm supplies energy. Anchors: Paperclip's confident physical brand; Brr's quiet transcript; a fast-forward transport symbol.
+
+Full-palette strategy: tinted charcoal and warm off-white; distinct red, orange, yellow, lime, cyan, cobalt, violet and pink agent objects. A vivid lime section explains extension. A cobalt section invites community contribution. Never gradient text. No decorative glass or glow panels. Neutral palette uses OKLCH, chroma 0.005–0.01. Preserve text and control contrast.
+
+Choose Archivo for its solid, mechanical poster voice, with heavy, tightly tracked display type and readable medium body weights. Refused greenfield reflex fonts Inter, DM Sans and Space Grotesk. Google Fonts Archivo is the selected catalog source; self-host with OFL notice. Code alone uses system monospace. Use fluid headings, fixed rem body sizes, and a 65ch body measure.
+
+Mock fidelity inventory: compact wordmark/navigation and pill CTA (semantic HTML); split hero with 'Your work. Your way.' and a rainbow chevron swarm (generated transparent artwork); large quiet product tour on charcoal (semantic React); lime extension section with a three-module connected illustration (generated decorative artwork plus semantic labels); blue community section; build guide and native FAQ. No generated interface text is shipped. The tour is visibly illustrative and uses representative tasks, not personal native screenshots.
+
+Use a 4px spacing base, asymmetric editorial sections, hairlines and no repeated feature-card grid. Keyboard-visible focus, minimum 44px targets, native disclosure, responsive composition, reduced motion, and no hover-only action. Agent art communicates motion through its forms and trails. Keep button feedback brief, with no infinite movement or blocking intro. Mobile stacks the hero art and simplifies the demo sidebar without hiding the tour controls.

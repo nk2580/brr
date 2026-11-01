@@ -1,0 +1,11 @@
+Brr project source
+Copyright 2026 Brr project
+
+Brr includes a source fork of OpenAI Codex. The fork is pinned to the upstream
+revision and records its maintained changes in runtime/UPSTREAM.md. The Codex
+source retains its upstream LICENSE and NOTICE files, including notices for
+third-party components. Those notices apply to the relevant portions of the
+runtime.
+
+Brr is an independent project. Mention of OpenAI Codex identifies upstream
+source and does not imply sponsorship, endorsement, or affiliation.

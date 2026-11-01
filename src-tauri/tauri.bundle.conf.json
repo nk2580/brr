@@ -1,0 +1,11 @@
+{
+  "bundle": {
+    "macOS": { "entitlements": "Entitlements.plist" },
+    "externalBin": ["binaries/brr-runtime", "binaries/codex-code-mode-host"],
+    "resources": {
+      "../runtime/codex/LICENSE": "licenses/Codex-LICENSE.txt",
+      "../runtime/codex/NOTICE": "licenses/Codex-NOTICE.txt",
+      "../runtime/UPSTREAM.md": "licenses/Brr-runtime-upstream.md"
+    }
+  }
+}

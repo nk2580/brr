@@ -1,0 +1,10 @@
+[package]
+name = "brr-runtime-policy"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[lib]
+name = "brr_runtime_policy"
+path = "src/lib.rs"

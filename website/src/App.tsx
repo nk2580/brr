@@ -51,7 +51,7 @@ function BuildGuide() {
       <span className="eyebrow">GET BRR / EARLY DESKTOP BUILD</span>
       <h2 id="build-heading">Start something.</h2>
       <p>Brr is taking shape in the open. The macOS app is ready to build from source, and there is plenty of room to make it your own.</p>
-      <a className="button button-light" href="/downloads/brr-source.tar.gz" download><Download size={17} aria-hidden="true" /> Download source</a>
+      <a className="button button-light" href="https://github.com/nk2580/brr/releases/download/v0.1.0/brr-source.tar.gz"><Download size={17} aria-hidden="true" /> Download source</a>
       <p className="build-availability">Source archive · Apache 2.0<br />A public, notarized app download is not available yet.</p>
     </div>
     <div className="build-guide">

@@ -8,7 +8,7 @@ describe('Brr marketing page', () => {
     render(<App />)
     expect(screen.getByRole('heading', { level: 1, name: /Your work. Your way./ })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: 'Explore Brr' })).toHaveAttribute('href', '#possibilities')
-    expect(screen.getByRole('link', { name: 'Download source' })).toHaveAttribute('href', '/downloads/brr-source.tar.gz')
+    expect(screen.getByRole('link', { name: 'Download source' })).toHaveAttribute('href', 'https://github.com/nk2580/brr/releases/download/v0.1.0/brr-source.tar.gz')
     expect(screen.getByRole('heading', { name: 'A harness you can make your own.' })).toBeInTheDocument()
   })
 

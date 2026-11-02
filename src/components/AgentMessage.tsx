@@ -1,8 +1,10 @@
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type { AgentItem } from '../lib/session';
+import { extractMcpAppInvocation } from '../lib/mcp-app';
+import { McpApp } from './McpApp';
 
-type AgentMessageProps = { item: AgentItem };
+type AgentMessageProps = { item: AgentItem; threadId?: string; onUsePrompt?: (text: string) => void };
 
 function stringField(item: AgentItem, field: string): string | undefined {
   const value = item[field];
@@ -56,7 +58,7 @@ function readableType(type: string): string {
   return type.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/^./, (letter) => letter.toUpperCase());
 }
 
-export function AgentMessage({ item }: AgentMessageProps) {
+export function AgentMessage({ item, threadId, onUsePrompt }: AgentMessageProps) {
   if (item.type === 'userMessage') {
     return (
       <article className="agent-message agent-message-user" data-item-type={item.type} style={{ display: 'flex', justifyContent: 'flex-end' }}>
@@ -112,11 +114,13 @@ export function AgentMessage({ item }: AgentMessageProps) {
   if (item.type === 'mcpToolCall' || item.type === 'collabAgentToolCall' || item.type === 'subAgentActivity') {
     const status = stringField(item, 'status');
     const detail = stringField(item, 'prompt') ?? stringField(item, 'agentPath');
+    const mcpApp = item.type === 'mcpToolCall' ? extractMcpAppInvocation(item, threadId) : null;
     return (
       <section className="agent-message agent-message-activity" data-item-type={item.type}>
         <strong>{activityLabel(item)}</strong>
         {status && <span> · {status}</span>}
         {detail && <p>{detail}</p>}
+        {mcpApp && <McpApp invocation={mcpApp} onUsePrompt={onUsePrompt} />}
       </section>
     );
   }

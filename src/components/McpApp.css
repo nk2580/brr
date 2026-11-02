@@ -1,0 +1,12 @@
+.mcp-app-host { position: relative; overflow: hidden; margin: 12px 0; border: 1px solid #ffffff1c; border-radius: 10px; background: #191a18; color: #e5e5dc; }
+.mcp-app-host > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 12px; border-bottom: 1px solid #ffffff16; font-size: 12px; }
+.mcp-app-host > header span { color: #97988e; }
+.mcp-app-host > iframe { display: block; width: 100%; min-height: 300px; height: min(60vh, 620px); border: 0; background: #fff; }
+.mcp-app-host > p { margin: 10px 12px; font-size: 12px; }
+.mcp-app-error { color: #ffaaa3; }
+.mcp-app-consent { position: absolute; z-index: 2; inset: auto 12px 12px; display: grid; gap: 8px; padding: 12px; border: 1px solid #d5a964; border-radius: 8px; background: #262620; box-shadow: 0 8px 24px #0009; font-size: 12px; }
+.mcp-app-consent pre { max-height: 140px; overflow: auto; margin: 0; padding: 8px; background: #151614; white-space: pre-wrap; overflow-wrap: anywhere; }
+.mcp-app-consent code { overflow-wrap: anywhere; color: #d7c58f; }
+.mcp-app-consent button, .mcp-app-message button { justify-self: end; padding: 6px 10px; border: 1px solid #ffffff2a; border-radius: 6px; background: #393a34; color: inherit; cursor: pointer; }
+.mcp-app-message { padding: 10px 12px; border-top: 1px solid #ffffff16; font-size: 12px; }
+.mcp-app-message pre { max-height: 220px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; color: #c6c7bb; }

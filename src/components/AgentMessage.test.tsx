@@ -1,7 +1,9 @@
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { AgentMessage } from './AgentMessage';
+
+vi.mock('./McpApp', () => ({ McpApp: ({ invocation }: any) => <div data-testid="mcp-app">{invocation.resourceUri}</div> }));
 
 describe('AgentMessage', () => {
   it('labels a runtime plan item as a proposed plan', () => {
@@ -49,5 +51,13 @@ describe('AgentMessage', () => {
     expect(screen.getByText('pnpm build')).toBeInTheDocument();
     expect(screen.getByText('Build complete')).toBeInTheDocument();
     expect(screen.getByText('Exit code: 0')).toBeInTheDocument();
+  });
+
+  it('renders an MCP App only for tool items with a UI resource and active thread', () => {
+    const onUsePrompt = vi.fn();
+    const { rerender } = render(<AgentMessage item={{ id: 'tool-1', type: 'mcpToolCall', server: 'calendar', tool: 'today', mcpAppUi: { resourceUri: 'ui://calendar/today' } }} threadId="thread-1" onUsePrompt={onUsePrompt} />);
+    expect(screen.getByTestId('mcp-app')).toHaveTextContent('ui://calendar/today');
+    rerender(<AgentMessage item={{ id: 'tool-1', type: 'mcpToolCall', server: 'calendar', tool: 'today', mcpAppUi: { resourceUri: 'ui://calendar/today' } }} />);
+    expect(screen.queryByTestId('mcp-app')).not.toBeInTheDocument();
   });
 });

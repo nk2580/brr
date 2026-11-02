@@ -1,17 +1,25 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { describe, it, expect, vi } from 'vitest'
+import { beforeEach, describe, it, expect, vi } from 'vitest'
 import App from './App'
 
-const events = vi.hoisted(() => ({ handler: null as null | ((event: any) => void) }))
+const events = vi.hoisted(() => ({ handler: null as null | ((event: any) => void), handlers: [] as Array<(event: any) => void> }))
 const backend = vi.hoisted(() => ({
   desktop: true,
   connect: vi.fn(async () => ({ account: null, models: [], threads: [] })),
   login: vi.fn(async () => ({ loginId: 'login-1' })),
   cancelLogin: vi.fn(async () => ({status:'canceled'})),
   account: vi.fn(async () => null),
-  subscribe: vi.fn(async (handler: (event: any) => void) => { events.handler = handler; return () => { events.handler = null } }),
+  subscribe: vi.fn(async (handler: (event: any) => void) => {
+    events.handlers.push(handler)
+    events.handler = handler
+    return () => {
+      events.handlers = events.handlers.filter(candidate => candidate !== handler)
+      events.handler = events.handlers.at(-1) ?? null
+    }
+  }),
   chooseWorkspace: vi.fn(async () => '/project'),
+  approveWorktree: vi.fn(async () => undefined),
   start: vi.fn(async () => ({thread:{id:'thread-1', cwd:'/project', preview:'', updatedAt:1}})),
   resume: vi.fn(async (id: string) => ({thread:{id, cwd:'/project', preview:'', updatedAt:1, turns:[]}})),
   send: vi.fn(async () => ({turn:{id:'turn-1'}})),
@@ -22,9 +30,218 @@ const backend = vi.hoisted(() => ({
   logout: vi.fn(async () => ({})),
   threads: vi.fn(async () => []),
 }))
-vi.mock('./lib/client', () => ({ client: backend, isDesktop: () => backend.desktop }))
+const agentApi = vi.hoisted(() => ({
+  list: vi.fn(async () => ({ data: [] })), settings: vi.fn(async () => ({ maxBackground: 4, maxPerAgent: 2 })),
+  decisions: vi.fn(async () => ({ data: [] })), drafts: vi.fn(async () => ({ data: [] })),
+  interview: vi.fn(), approve: vi.fn(), sessions: vi.fn(async () => ({ data: [] })), open: vi.fn(),
+  tasks: vi.fn(async () => ({ data: [] })), createTask: vi.fn(), proposals: vi.fn(async () => ({ data: [] })),
+  workflows: vi.fn(async () => ({ data: [] })), memory: vi.fn(async () => ({ data: [] })),
+  skills: vi.fn(async () => ({ data: [] })), projects: vi.fn(async () => ({ data: [] })),
+  inspectWorkspace: vi.fn(async (cwd: string) => ({ cwd, git: false, commands: [] })),
+}))
+vi.mock('./lib/client', () => ({ client: backend, isDesktop: () => backend.desktop, WorktreeSetupRequired: class extends Error { kind = 'worktreeSetupRequired'; constructor(public cwd: string, public commands: unknown[]) { super('Review project setup hooks') } } }))
+vi.mock('./lib/agents', () => ({ agents: agentApi }))
 
 describe('desktop workspace', () => {
+  beforeEach(() => localStorage.clear())
+  it('loads saved agent identities after delayed connection and refreshes them on agent changes', async () => {
+    let finishConnection!: (connection: unknown) => void
+    const savedAgent = { id: 'saved-agent', name: 'Release guide', description: 'Keeps releases safe', instructions: '', soul: '', model: 'gpt-6.1-sol', effort: 'high', revision: 1, createdAt: 1, updatedAt: 1 }
+    backend.connect.mockImplementationOnce(() => new Promise(resolve => { finishConnection = resolve }) as never)
+    agentApi.list.mockResolvedValueOnce({ data: [savedAgent] } as never)
+    render(<App />)
+
+    await waitFor(() => expect(backend.connect).toHaveBeenCalled())
+    expect(agentApi.list).not.toHaveBeenCalled()
+    await act(async () => {
+      finishConnection({ account: { type: 'chatgpt', email: 'dev@example.com', planType: 'plus' }, models: [{ id: 'sol', model: 'gpt-6.1-sol', displayName: 'GPT Sol', isDefault: true, defaultReasoningEffort: 'medium', supportedReasoningEfforts: [] }], threads: [] })
+    })
+
+    const identity = await screen.findByRole('combobox', { name: 'Chat identity' })
+    await waitFor(() => expect(Array.from((identity as HTMLSelectElement).options).map(option => option.text)).toContain('Release guide'))
+
+    agentApi.list.mockResolvedValueOnce({ data: [{ ...savedAgent, name: 'Release guide revised', revision: 2 }] } as never)
+    act(() => events.handlers.forEach(handler => handler({ method: 'brr/agents/changed', params: {} })))
+    await waitFor(() => expect(Array.from((identity as HTMLSelectElement).options).map(option => option.text)).toContain('Release guide revised'))
+  })
+
+  it('uses a contextual Agents sidebar and preserves its collapsed state and draft when returning Home', async () => {
+    render(<App />)
+    const message = screen.getByRole('textbox', { name: 'Message' })
+    await userEvent.type(message, 'Keep this draft')
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Agents' }))
+
+    expect(await screen.findByRole('region', { name: 'Agents' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Agents' })).toBeInTheDocument()
+    expect(screen.queryByRole('complementary', { name: 'Main sidebar' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Activity on' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'New conversation' })).not.toBeInTheDocument()
+    const collapse = screen.getByRole('button', { name: 'Collapse sidebar' })
+    expect(collapse).toHaveAttribute('aria-controls', 'agents-sidebar')
+    expect(collapse).toHaveAttribute('aria-expanded', 'true')
+    await userEvent.click(collapse)
+    expect(screen.getByRole('button', { name: 'Expand sidebar' })).toHaveAttribute('aria-controls', 'agents-sidebar')
+
+    await userEvent.click(screen.getByRole('button', { name: 'Home' }))
+    expect(screen.queryByRole('region', { name: 'Agents' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('complementary', { name: 'Main sidebar' })).not.toBeInTheDocument()
+    expect(screen.getByRole('textbox', { name: 'Message' })).toHaveValue('Keep this draft')
+    const expand = screen.getByRole('button', { name: 'Expand sidebar' })
+    expect(expand).toHaveAttribute('aria-controls', 'main-sidebar')
+    await userEvent.click(expand)
+    expect(screen.getByRole('complementary', { name: 'Main sidebar' })).toBeVisible()
+    expect(screen.getByRole('textbox', { name: 'Message' })).toHaveValue('Keep this draft')
+  })
+
+  it('returns to the selected conversation when opening a recent chat from Agents', async () => {
+    backend.connect.mockResolvedValueOnce({ account: null, models: [], threads: [
+      { id: 'navigation-thread', name: 'Existing navigation thread', preview: 'Existing navigation thread', cwd: '/project', updatedAt: 1 },
+    ] } as never)
+    render(<App />)
+    await screen.findByRole('button', { name: 'Existing navigation thread' })
+    await userEvent.click(screen.getByRole('button', { name: 'Agents' }))
+    expect(await screen.findByRole('region', { name: 'Agents' })).toBeVisible()
+
+    await userEvent.click(screen.getByRole('button', { name: 'Home' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Existing navigation thread' }))
+
+    expect(screen.queryByRole('region', { name: 'Agents' })).not.toBeInTheDocument()
+    expect(screen.getByRole('textbox', { name: 'Message' })).toBeVisible()
+  })
+
+  it('starts a selected named agent with its saved model and workspace defaults', async () => {
+    backend.connect.mockResolvedValueOnce({account:{type:'chatgpt', email:'dev@example.com', planType:'plus'}, models:[{id:'sol', model:'gpt-6.1-sol', displayName:'GPT Sol', isDefault:true, defaultReasoningEffort:'medium', supportedReasoningEfforts:[]}], threads:[]} as never)
+    backend.chooseWorkspace.mockResolvedValueOnce('/project')
+    agentApi.list.mockResolvedValueOnce({ data: [{ id: 'agent-1', name: 'Release guide', description: '', instructions: '', soul: '', model: 'gpt-6.1-sol', effort: 'high', revision: 1, createdAt: 1, updatedAt: 1 }] } as never)
+    agentApi.open.mockResolvedValueOnce({ thread: { id: 'agent-session', cwd: '/project', preview: '', updatedAt: 1 } })
+    render(<App />)
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Choose project folder' }))
+    await userEvent.selectOptions(await screen.findByRole('combobox', { name: 'Chat identity' }), 'agent-1')
+    await userEvent.type(screen.getByRole('textbox', { name: 'Message' }), 'Review this release')
+    await userEvent.click(screen.getByRole('button', { name: 'Send message' }))
+
+    await waitFor(() => expect(agentApi.open).toHaveBeenCalledWith('agent-1', { model: 'gpt-6.1-sol', effort: 'high', cwd: '/project', readOnly: false }))
+    await waitFor(() => expect(backend.send).toHaveBeenCalledWith('agent-session', 'Review this release', 'gpt-6.1-sol', 'high', 'default'))
+    expect(backend.start).not.toHaveBeenCalled()
+  })
+
+  it('can start a named agent chat without requiring a project folder', async () => {
+    backend.connect.mockResolvedValueOnce({account:{type:'chatgpt', email:'dev@example.com', planType:'plus'}, models:[{id:'sol', model:'gpt-6.1-sol', displayName:'GPT Sol', isDefault:true, defaultReasoningEffort:'medium', supportedReasoningEfforts:[]}], threads:[]} as never)
+    agentApi.list.mockResolvedValueOnce({ data: [{ id: 'agent-1', name: 'Release guide', description: '', instructions: '', soul: '', model: 'gpt-6.1-sol', effort: 'medium', revision: 1, createdAt: 1, updatedAt: 1 }] } as never)
+    agentApi.open.mockResolvedValueOnce({ thread: { id: 'agent-session-no-project', cwd: '', preview: '', updatedAt: 1 } })
+    render(<App />)
+
+    const identity = await screen.findByRole('combobox', { name: 'Chat identity' })
+    await waitFor(() => expect(Array.from((identity as HTMLSelectElement).options).map(option => option.value)).toContain('agent-1'))
+    await userEvent.selectOptions(identity, 'agent-1')
+    await userEvent.type(screen.getByRole('textbox', { name: 'Message' }), 'Start here')
+    await userEvent.click(screen.getByRole('button', { name: 'Send message' }))
+
+    await waitFor(() => expect(agentApi.open).toHaveBeenCalledWith('agent-1', { model: 'gpt-6.1-sol', effort: 'medium', readOnly: false }))
+    expect(backend.start).not.toHaveBeenCalled()
+  })
+
+  it('opens a fresh interview thread without trying to resume its unpersisted rollout', async () => {
+    const defaultResume = backend.resume.getMockImplementation()
+    backend.connect.mockResolvedValueOnce({account:{type:'chatgpt', email:'dev@example.com', planType:'plus'}, models:[{id:'sol', model:'gpt-6.1-sol', displayName:'GPT Sol', isDefault:true, defaultReasoningEffort:'medium', supportedReasoningEfforts:[]}], threads:[]} as never)
+    agentApi.interview.mockResolvedValueOnce({ thread: { id: 'fresh-interview', cwd: '/project', preview: 'New agent interview', updatedAt: 1 } })
+    backend.resume.mockImplementation(async id => {
+      if (id === 'fresh-interview') throw new Error('no rollout found for thread id')
+      return { thread: { id, cwd: '/project', preview: '', updatedAt: 1, turns: [] } }
+    })
+    render(<App />)
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Agents' }))
+    await userEvent.click((await screen.findAllByRole('button', { name: 'New agent' }))[0])
+    const message = await screen.findByRole('textbox', { name: 'Message' })
+    expect(backend.resume).not.toHaveBeenCalledWith('fresh-interview')
+    await userEvent.type(message, 'Help me define a careful release guide')
+    await userEvent.click(screen.getByRole('button', { name: 'Send message' }))
+
+    await waitFor(() => expect(backend.send).toHaveBeenCalledWith('fresh-interview', 'Help me define a careful release guide', 'gpt-6.1-sol', 'medium', 'default'))
+    expect(screen.queryByText('no rollout found for thread id')).not.toBeInTheDocument()
+    backend.resume.mockImplementation(defaultResume!)
+  })
+
+  it('opens a fresh named-agent session without resuming before its first turn', async () => {
+    const defaultResume = backend.resume.getMockImplementation()
+    const profile = { id: 'agent-1', name: 'Release guide', description: '', instructions: '', soul: '', model: 'gpt-6.1-sol', effort: 'high', revision: 1, createdAt: 1, updatedAt: 1 }
+    backend.connect.mockResolvedValueOnce({account:{type:'chatgpt', email:'dev@example.com', planType:'plus'}, models:[{id:'sol', model:'gpt-6.1-sol', displayName:'GPT Sol', isDefault:true, defaultReasoningEffort:'medium', supportedReasoningEfforts:[]}], threads:[]} as never)
+    agentApi.list.mockResolvedValueOnce({ data: [profile] } as never)
+    agentApi.list.mockResolvedValueOnce({ data: [profile] } as never)
+    agentApi.open.mockResolvedValueOnce({ thread: { id: 'fresh-agent-session', cwd: '', preview: 'New session', updatedAt: 1 } })
+    backend.resume.mockImplementation(async id => {
+      if (id === 'fresh-agent-session') throw new Error('no rollout found for thread id')
+      return { thread: { id, cwd: '/project', preview: '', updatedAt: 1, turns: [] } }
+    })
+    render(<App />)
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Agents' }))
+    await userEvent.click(await screen.findByRole('button', { name: /Release guide/ }))
+    await userEvent.click(await screen.findByRole('button', { name: 'New session' }))
+    const message = await screen.findByRole('textbox', { name: 'Message' })
+    expect(backend.resume).not.toHaveBeenCalledWith('fresh-agent-session')
+    await userEvent.type(message, 'Review this release')
+    await userEvent.click(screen.getByRole('button', { name: 'Send message' }))
+
+    await waitFor(() => expect(backend.send).toHaveBeenCalledWith('fresh-agent-session', 'Review this release', 'gpt-6.1-sol', 'high', 'default'))
+    expect(screen.queryByText('no rollout found for thread id')).not.toBeInTheDocument()
+    backend.resume.mockImplementation(defaultResume!)
+  })
+
+  it('shows exact project setup hooks before starting a named agent in a Git project', async () => {
+    const agentOpensBefore = agentApi.open.mock.calls.length
+    backend.connect.mockResolvedValueOnce({account:{type:'chatgpt', email:'dev@example.com', planType:'plus'}, models:[{id:'sol', model:'gpt-6.1-sol', displayName:'GPT Sol', isDefault:true, defaultReasoningEffort:'medium', supportedReasoningEfforts:[]}], threads:[]} as never)
+    backend.chooseWorkspace.mockResolvedValueOnce('/project')
+    agentApi.list.mockResolvedValueOnce({ data: [{ id: 'agent-1', name: 'Release guide', description: '', instructions: '', soul: '', model: 'gpt-6.1-sol', effort: 'medium', revision: 1, createdAt: 1, updatedAt: 1 }] } as never)
+    agentApi.inspectWorkspace.mockResolvedValueOnce({ cwd: '/project', git: true, commands: [{ phase: 'post-create', name: 'install', template: 'pnpm install', approved: false }] } as never)
+    render(<App />)
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Choose project folder' }))
+    await userEvent.selectOptions(await screen.findByRole('combobox', { name: 'Chat identity' }), 'agent-1')
+    await userEvent.type(screen.getByRole('textbox', { name: 'Message' }), 'Review the release')
+    await userEvent.click(screen.getByRole('button', { name: 'Send message' }))
+
+    const review = await screen.findByRole('region', { name: 'Worktree setup approval' })
+    expect(review).toHaveTextContent('pnpm install')
+    expect(agentApi.open.mock.calls.length).toBe(agentOpensBefore)
+  })
+
+  it('restores a saved session identity from the thread binding after reload', async () => {
+    backend.connect.mockResolvedValueOnce({account:{type:'chatgpt', email:'dev@example.com', planType:'plus'}, models:[{id:'sol', model:'gpt-6.1-sol', displayName:'GPT Sol', isDefault:true, defaultReasoningEffort:'medium', supportedReasoningEfforts:[]}], threads:[{id:'agent-session', cwd:'/project', preview:'Release review', updatedAt:1, brr:{agentId:'agent-1', kind:'agent'}}]} as never)
+    agentApi.list.mockResolvedValueOnce({ data: [{ id: 'agent-1', name: 'Release guide', description: '', instructions: '', soul: '', model: 'gpt-6.1-sol', effort: 'high', revision: 1, createdAt: 1, updatedAt: 1 }] } as never)
+    render(<App />)
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Release review' }))
+
+    const identity = await screen.findByRole('combobox', { name: 'Chat identity' })
+    await waitFor(() => expect(identity).toHaveValue('agent-1'))
+    expect(identity).toBeDisabled()
+    await waitFor(() => expect(backend.resume).toHaveBeenCalledWith('agent-session'))
+  })
+
+  it('turns an exact @mention into a separate task with only the current message', async () => {
+    const sendsBefore = backend.send.mock.calls.length
+    backend.connect.mockResolvedValueOnce({account:{type:'chatgpt', email:'dev@example.com', planType:'plus'}, models:[{id:'sol', model:'gpt-6.1-sol', displayName:'GPT Sol', isDefault:true, defaultReasoningEffort:'medium', supportedReasoningEfforts:[]}], threads:[]} as never)
+    backend.chooseWorkspace.mockResolvedValueOnce('/project')
+    agentApi.list.mockResolvedValueOnce({ data: [{ id: 'agent-1', name: 'Release guide', description: '', instructions: '', soul: '', model: 'gpt-6.1-sol', effort: 'medium', revision: 1, createdAt: 1, updatedAt: 1 }] } as never)
+    agentApi.createTask.mockResolvedValueOnce({ id: 'task-1', status: 'queued' })
+    render(<App />)
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Choose project folder' }))
+    await userEvent.type(screen.getByRole('textbox', { name: 'Message' }), 'Check this change. @Release guide list concrete blockers.')
+    await userEvent.click(screen.getByRole('button', { name: 'Send message' }))
+
+    await waitFor(() => expect(agentApi.createTask).toHaveBeenCalledWith(expect.objectContaining({
+      agentId: 'agent-1', instructions: 'Check this change. list concrete blockers.', cwd: '/project',
+      acceptanceCriteria: [expect.any(String)],
+    })))
+    expect(agentApi.createTask.mock.calls[0][0]).not.toHaveProperty('sourceThreadId')
+    expect(backend.send.mock.calls.length).toBe(sendsBefore)
+  })
+
   it('switches into planning mode with /plan and sends the command arguments as the prompt', async () => {
     backend.connect.mockResolvedValueOnce({account:{type:'chatgpt', email:'dev@example.com', planType:'plus'}, models:[{id:'sol', model:'gpt-6.1-sol', displayName:'GPT Sol', isDefault:true, defaultReasoningEffort:'medium', supportedReasoningEfforts:[]}], threads:[]} as never)
     backend.chooseWorkspace.mockResolvedValueOnce('/project')

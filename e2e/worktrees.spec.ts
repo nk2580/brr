@@ -25,6 +25,7 @@ test('saved worktrees display their location and new chats use the original proj
         if (method === 'model/list') return { data: [{ id: 'sol', model: 'gpt-6.1-sol', displayName: 'Sol', isDefault: true, supportedReasoningEfforts: [{ reasoningEffort: 'medium' }], defaultReasoningEffort: 'medium' }] }
         if (method === 'thread/list') return { data: [saved], nextCursor: null }
         if (method === 'thread/resume') return { thread: saved }
+        if (method === 'brr/worktree/inspect') return { commands: [] }
         if (method === 'thread/start') return { thread: { id: 'new', preview: '', cwd: '/workspace/atlas.new', updatedAt: 2,
           worktree: { projectPath: params.cwd, path: '/workspace/atlas.new', cwd: '/workspace/atlas.new', branch: 'codex/brr-new' } } }
         if (method === 'turn/start') return { turn: { id: 'new-turn' } }

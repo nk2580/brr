@@ -7,6 +7,14 @@ export interface Account { type: 'chatgpt'; email: string | null; planType: stri
 export interface Model { id: string; model: string; displayName: string; isDefault: boolean; supportedReasoningEfforts: {reasoningEffort: string; description: string}[]; defaultReasoningEffort: string }
 export interface Turn { id: string; status?: string; items?: unknown[] }
 export interface Worktree { projectPath: string; path: string; branch: string; cwd: string }
+export interface WorktreeSetupCommand { phase: string; name?: string | null; template: string; approved: boolean }
+export class WorktreeSetupRequired extends Error {
+  readonly kind = 'worktreeSetupRequired'
+  constructor(readonly cwd: string, readonly commands: WorktreeSetupCommand[]) {
+    super('Worktree setup approval required')
+    this.name = 'WorktreeSetupRequired'
+  }
+}
 export interface Thread { id: string; name?: string | null; preview: string; cwd: string; updatedAt: number; worktree?: Worktree; historyMode?: 'legacy' | 'paginated'; collaborationMode?: { mode?: string } | null; turns?: Turn[] }
 export interface Connection { account: Account | null; models: Model[]; threads: Thread[] }
 
@@ -42,7 +50,13 @@ export const client = {
     return all
   },
   chooseWorkspace: () => open({directory: true, multiple: false, title: 'Choose a project folder'}),
-  start: (cwd: string, model: string, readOnly: boolean) => rpc<{thread: Thread}>('thread/start', {cwd, model, modelProvider: 'openai', approvalPolicy: 'on-request', sandbox: readOnly ? 'read-only' : 'workspace-write'}),
+  async start(cwd: string, model: string, readOnly: boolean): Promise<{thread: Thread}> {
+    const inspection = await rpc<{commands: WorktreeSetupCommand[]}>('brr/worktree/inspect', {cwd})
+    const unapproved = inspection.commands.filter(command => !command.approved)
+    if (unapproved.length) throw new WorktreeSetupRequired(cwd, unapproved)
+    return rpc<{thread: Thread}>('thread/start', {cwd, model, modelProvider: 'openai', approvalPolicy: 'on-request', sandbox: readOnly ? 'read-only' : 'workspace-write'})
+  },
+  approveWorktree: (cwd: string, templates: string[]) => rpc('brr/worktree/approve', {cwd, templates}),
   async resume(threadId: string, readOnly?: boolean): Promise<{thread: Thread}> {
     const response = await rpc<{thread: Thread; collaborationMode?: Thread['collaborationMode']}>('thread/resume', {threadId, modelProvider: 'openai', approvalPolicy: 'on-request', ...(readOnly === undefined ? {} : {sandbox: readOnly ? 'read-only' : 'workspace-write'})})
     const thread = {...response.thread, collaborationMode: response.collaborationMode ?? response.thread.collaborationMode}

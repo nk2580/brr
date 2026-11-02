@@ -1,0 +1,24 @@
+.appearance-settings { flex: 1; min-width: 0; overflow-y: auto; padding: 28px 40px 48px; color: var(--foreground); }
+.appearance-settings-header { display: flex; align-items: center; justify-content: space-between; gap: 24px; max-width: 720px; }
+.appearance-settings-header h2 { margin: 0; font-size: 24px; font-weight: 600; letter-spacing: -.025em; }
+.appearance-settings-header button { display: grid; place-items: center; width: 36px; height: 36px; border: 0; border-radius: 8px; background: transparent; color: var(--foreground); font-size: 24px; }
+.appearance-settings-header button:hover { background: oklch(28% .004 120); }
+.appearance-settings-copy { max-width: 60ch; margin: 18px 0 32px; color: oklch(78% .008 100); font-size: 13px; line-height: 1.7; }
+.appearance-settings fieldset { min-width: 0; max-width: 720px; padding: 0; margin: 0; border: 0; }
+.appearance-settings legend { padding: 0; margin-bottom: 14px; font-size: 13px; font-weight: 550; }
+.appearance-color-options { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+.appearance-color-option { position: relative; display: flex; flex-direction: column; align-items: flex-start; gap: 12px; min-height: 104px; padding: 15px; border: 1px solid oklch(40% .005 120); border-radius: 10px; background: oklch(23% .004 120); cursor: pointer; }
+.appearance-color-option:hover { background: oklch(27% .004 120); }
+.appearance-color-option.selected { border-color: oklch(88% .01 110); }
+.appearance-color-option:focus-within { outline: 2px solid oklch(92% .22 116); outline-offset: 3px; }
+.appearance-color-option input { position: absolute; width: 1px; height: 1px; margin: 0; padding: 0; clip-path: inset(50%); overflow: hidden; }
+.appearance-color-swatch { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 50%; background: var(--swatch-color); color: var(--swatch-foreground, oklch(18% .015 120)); font-size: 18px; }
+.appearance-color-name { font-size: 12px; font-weight: 500; }
+.appearance-color-default { position: absolute; top: 16px; right: 12px; color: oklch(78% .008 100); font-size: 10px; }
+.appearance-save-status { max-width: 60ch; color: oklch(83% .11 65); font-size: 12px; line-height: 1.7; margin-top: 20px; }
+@media (max-width: 960px) {
+  .appearance-settings { padding: 20px 24px 32px; }
+  .appearance-settings-copy { margin-bottom: 24px; }
+  .appearance-color-option { padding: 12px; }
+  .appearance-color-default { position: static; margin-top: -8px; }
+}

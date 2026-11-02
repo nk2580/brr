@@ -12,6 +12,8 @@ use std::time::Duration;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
+use rmcp::model::GetPromptRequestParams;
+use rmcp::model::GetPromptResult;
 use rmcp::model::ListResourceTemplatesResult;
 use rmcp::model::ListResourcesResult;
 use rmcp::model::PaginatedRequestParams;
@@ -28,6 +30,62 @@ use crate::resource_client::McpResourceServerCacheKey;
 use crate::rmcp_client::ManagedClient;
 
 impl McpConnectionSet {
+    pub async fn list_prompts(
+        &self,
+        server: &str,
+        cursor: Option<String>,
+    ) -> Result<serde_json::Value> {
+        let (managed, timeout) = self.client_by_name(server).await?;
+        let params = cursor.map(|cursor| serde_json::json!({"cursor": cursor}));
+        match managed
+            .send_custom_request("prompts/list", params, timeout)
+            .await?
+        {
+            ServerResult::CustomResult(result) => Ok(result.0),
+            ServerResult::ListPromptsResult(result) => {
+                serde_json::to_value(result).context("failed to serialize prompts/list result")
+            }
+            _ => Err(anyhow!("prompts/list returned an unexpected MCP result")),
+        }
+    }
+
+    pub async fn get_prompt(
+        &self,
+        server: &str,
+        name: String,
+        arguments: Option<serde_json::Map<String, serde_json::Value>>,
+    ) -> Result<GetPromptResult> {
+        let (managed, timeout) = self.client_by_name(server).await?;
+        let mut params = GetPromptRequestParams::new(name);
+        params.arguments = arguments;
+        managed.get_prompt(params, timeout).await
+    }
+
+    pub async fn complete_prompt(
+        &self,
+        server: &str,
+        reference: serde_json::Value,
+        argument: serde_json::Value,
+        context: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value> {
+        let (managed, timeout) = self.client_by_name(server).await?;
+        let mut params = serde_json::json!({"ref": reference, "argument": argument});
+        if let Some(context) = context {
+            params["context"] = context;
+        }
+        match managed
+            .send_custom_request("completion/complete", Some(params), timeout)
+            .await?
+        {
+            ServerResult::CustomResult(result) => Ok(result.0),
+            ServerResult::CompleteResult(result) => serde_json::to_value(result)
+                .context("failed to serialize completion/complete result"),
+            _ => Err(anyhow!(
+                "completion/complete returned an unexpected MCP result"
+            )),
+        }
+    }
+
     pub(crate) fn resource_cache_key(
         &self,
         server: &str,

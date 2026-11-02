@@ -198,6 +198,7 @@ async fn transport_provided_bearer_token_avoids_placeholder_headers_and_redirect
         /*http_headers*/ None,
         /*env_http_headers*/ None,
         /*oauth_config*/ None,
+        /*oauth_resource*/ None,
         OAuthCredentialsStoreMode::File,
         AuthKeyringBackendKind::Direct,
         Arc::new(http_client.clone()),

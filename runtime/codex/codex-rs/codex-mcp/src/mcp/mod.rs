@@ -5,7 +5,9 @@ pub use auth::McpOAuthScopesSource;
 pub use auth::ResolvedMcpOAuthScopes;
 pub use auth::compute_auth_statuses;
 pub use auth::discover_supported_scopes;
+pub use auth::discover_supported_scopes_with_config;
 pub use auth::oauth_login_support;
+pub use auth::oauth_login_support_with_config;
 pub use auth::resolve_oauth_callback;
 pub use auth::resolve_oauth_scopes;
 pub use auth::should_retry_without_scopes;
@@ -433,7 +435,7 @@ pub fn effective_mcp_servers_from_configured(
                         server.auth = McpServerAuth::OAuth;
                     }
                 }
-                McpServerAuth::OAuth | McpServerAuth::EmaAuth => {}
+                McpServerAuth::None | McpServerAuth::OAuth | McpServerAuth::EmaAuth => {}
             }
             (
                 name,
@@ -464,6 +466,105 @@ pub async fn read_mcp_resource(
     server: &str,
     params: ReadResourceRequestParams,
 ) -> anyhow::Result<ReadResourceResult> {
+    let (manager, cancel_token) = threadless_mcp_connection_set(
+        config,
+        auth,
+        runtime_context,
+        codex_apps_tools_cache,
+        tool_catalog_cache,
+        server,
+    )
+    .await;
+    let result = manager.read_resource(server, params).await;
+    cancel_token.cancel();
+    result
+}
+
+pub async fn list_mcp_prompts(
+    config: &McpConfig,
+    auth: Option<&CodexAuth>,
+    runtime_context: McpRuntimeContext,
+    codex_apps_tools_cache: ConnectorRuntimeManager<ToolInfo>,
+    tool_catalog_cache: crate::McpToolCatalogCache,
+    server: &str,
+    cursor: Option<String>,
+) -> anyhow::Result<Value> {
+    let (manager, cancel_token) = threadless_mcp_connection_set(
+        config,
+        auth,
+        runtime_context,
+        codex_apps_tools_cache,
+        tool_catalog_cache,
+        server,
+    )
+    .await;
+    let result = manager.list_prompts(server, cursor).await;
+    cancel_token.cancel();
+    result
+}
+
+pub async fn get_mcp_prompt(
+    config: &McpConfig,
+    auth: Option<&CodexAuth>,
+    runtime_context: McpRuntimeContext,
+    codex_apps_tools_cache: ConnectorRuntimeManager<ToolInfo>,
+    tool_catalog_cache: crate::McpToolCatalogCache,
+    server: &str,
+    name: String,
+    arguments: Option<serde_json::Map<String, Value>>,
+) -> anyhow::Result<Value> {
+    let (manager, cancel_token) = threadless_mcp_connection_set(
+        config,
+        auth,
+        runtime_context,
+        codex_apps_tools_cache,
+        tool_catalog_cache,
+        server,
+    )
+    .await;
+    let result = manager
+        .get_prompt(server, name, arguments)
+        .await
+        .and_then(|result| serde_json::to_value(result).map_err(anyhow::Error::from));
+    cancel_token.cancel();
+    result
+}
+
+pub async fn complete_mcp_prompt(
+    config: &McpConfig,
+    auth: Option<&CodexAuth>,
+    runtime_context: McpRuntimeContext,
+    codex_apps_tools_cache: ConnectorRuntimeManager<ToolInfo>,
+    tool_catalog_cache: crate::McpToolCatalogCache,
+    server: &str,
+    reference: Value,
+    argument: Value,
+    context: Option<Value>,
+) -> anyhow::Result<Value> {
+    let (manager, cancel_token) = threadless_mcp_connection_set(
+        config,
+        auth,
+        runtime_context,
+        codex_apps_tools_cache,
+        tool_catalog_cache,
+        server,
+    )
+    .await;
+    let result = manager
+        .complete_prompt(server, reference, argument, context)
+        .await;
+    cancel_token.cancel();
+    result
+}
+
+async fn threadless_mcp_connection_set(
+    config: &McpConfig,
+    auth: Option<&CodexAuth>,
+    runtime_context: McpRuntimeContext,
+    codex_apps_tools_cache: ConnectorRuntimeManager<ToolInfo>,
+    tool_catalog_cache: crate::McpToolCatalogCache,
+    server: &str,
+) -> (McpConnectionSet, CancellationToken) {
     let mut mcp_servers = effective_mcp_servers(config, auth);
     mcp_servers.retain(|name, _| name == server);
     let cancel_token = CancellationToken::new();
@@ -496,10 +597,7 @@ pub async fn read_mcp_resource(
         crate::elicitation::ElicitationRequestRouter::default(),
     )
     .await;
-
-    let result = manager.read_resource(server, params).await;
-    cancel_token.cancel();
-    result
+    (manager, cancel_token)
 }
 
 #[derive(Debug, Clone)]

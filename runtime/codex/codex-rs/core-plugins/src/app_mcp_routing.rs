@@ -10,11 +10,16 @@ pub fn apps_route_available(auth_mode: Option<AuthMode>) -> bool {
     auth_mode.is_some_and(AuthMode::uses_codex_backend)
 }
 
-pub(crate) fn plugin_supports_apps(format: PluginManifestFormat, plugin_id: &PluginId) -> bool {
+pub(crate) fn plugin_supports_apps(
+    format: PluginManifestFormat,
+    plugin_id: &PluginId,
+    manifest_paths: &crate::manifest::PluginManifestPaths,
+) -> bool {
     // The remote curated installer overwrites app declarations with plugin-service metadata.
-    // Keep portable app declarations inactive for other Agent Plugins.
+    // Portable declarations use the selected manifest (root OpenAI extension or local overlay).
     format == PluginManifestFormat::Legacy
         || plugin_id.marketplace_name == REMOTE_GLOBAL_MARKETPLACE_NAME
+        || manifest_paths.apps.is_some()
 }
 
 pub(crate) fn apply_app_mcp_routing_policy<M>(

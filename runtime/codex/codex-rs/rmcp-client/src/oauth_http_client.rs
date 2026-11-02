@@ -16,7 +16,10 @@ use http::header::AUTHORIZATION;
 use http::header::CONTENT_ENCODING;
 use http::header::CONTENT_LENGTH;
 use http::header::CONTENT_TYPE;
+use http::header::COOKIE;
+use http::header::HOST;
 use http::header::LOCATION;
+use http::header::PROXY_AUTHORIZATION;
 use http::header::TRANSFER_ENCODING;
 use http::header::USER_AGENT;
 use oauth2::HttpRequest;
@@ -71,6 +74,8 @@ pub(crate) struct OAuthHttpClientAdapter {
     timeout: OAuthDiscoveryTimeout,
     has_configured_headers: bool,
     redirect_mode: StreamableHttpRedirectMode,
+    oidc_discovery_enabled: bool,
+    oidc_configuration_url: Option<Url>,
 }
 
 impl OAuthHttpClientAdapter {
@@ -82,6 +87,11 @@ impl OAuthHttpClientAdapter {
         redirect_policy: OAuthHttpRedirectPolicy,
         timeout: Option<Duration>,
     ) -> Result<HttpResponse, OAuthHttpClientError> {
+        if !self.oidc_discovery_enabled {
+            return self
+                .execute_request(request, redirect_policy, timeout)
+                .await;
+        }
         let issuer_path = request
             .uri()
             .path()
@@ -95,14 +105,25 @@ impl OAuthHttpClientAdapter {
                 .execute_request(request, redirect_policy, timeout)
                 .await;
         };
-        let mut candidates = vec![format!("/.well-known/openid-configuration{issuer_path}")];
-        if !issuer_path.is_empty() {
-            candidates.push(format!("{issuer_path}/.well-known/openid-configuration"));
-        }
-        let mut candidate_url =
-            Url::parse(&request.uri().to_string()).map_err(oauth_http_client_error)?;
-        candidate_url.set_query(None);
-        candidate_url.set_fragment(None);
+        let mut candidates = if let Some(configuration_url) = &self.oidc_configuration_url {
+            vec![configuration_url.clone()]
+        } else {
+            let mut candidates = vec![format!("/.well-known/openid-configuration{issuer_path}")];
+            if !issuer_path.is_empty() {
+                candidates.push(format!("{issuer_path}/.well-known/openid-configuration"));
+            }
+            let mut candidate_url =
+                Url::parse(&request.uri().to_string()).map_err(oauth_http_client_error)?;
+            candidate_url.set_query(None);
+            candidate_url.set_fragment(None);
+            candidates
+                .into_iter()
+                .filter_map(|path| {
+                    candidate_url.set_path(&path);
+                    Some(candidate_url.clone())
+                })
+                .collect()
+        };
         let operation = async {
             let original = self
                 .execute_request(request.clone(), redirect_policy, timeout)
@@ -113,9 +134,15 @@ impl OAuthHttpClientAdapter {
             // These are the same issuer's OIDC candidates, in RMCP's discovery
             // order. Reuse the adapter's header, origin and body-size checks.
             // Do not follow redirects here: RMCP owns discovery redirect policy.
-            for path in candidates {
-                candidate_url.set_path(&path);
+            for candidate_url in candidates.drain(..) {
                 let mut candidate = request.clone();
+                let original_url =
+                    Url::parse(&request.uri().to_string()).map_err(oauth_http_client_error)?;
+                if candidate_url.origin() != original_url.origin() {
+                    for header in [AUTHORIZATION, COOKIE, PROXY_AUTHORIZATION, HOST] {
+                        candidate.headers_mut().remove(header);
+                    }
+                }
                 *candidate.uri_mut() = candidate_url
                     .as_str()
                     .parse()
@@ -189,6 +216,8 @@ impl OAuthHttpClientAdapter {
             timeout: OAuthDiscoveryTimeout::Requested,
             has_configured_headers,
             redirect_mode,
+            oidc_discovery_enabled: true,
+            oidc_configuration_url: None,
         })
     }
 
@@ -207,7 +236,19 @@ impl OAuthHttpClientAdapter {
             timeout: OAuthDiscoveryTimeout::Capped(max_timeout),
             has_configured_headers,
             redirect_mode,
+            oidc_discovery_enabled: true,
+            oidc_configuration_url: None,
         })
+    }
+
+    pub(crate) fn with_oidc_discovery_enabled(mut self, enabled: bool) -> Self {
+        self.oidc_discovery_enabled = enabled;
+        self
+    }
+
+    pub(crate) fn with_oidc_configuration_url(mut self, url: Option<Url>) -> Self {
+        self.oidc_configuration_url = url;
+        self
     }
 
     pub(crate) async fn execute_request(

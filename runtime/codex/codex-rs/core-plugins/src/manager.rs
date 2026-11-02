@@ -35,7 +35,7 @@ use crate::loader::curated_plugin_cache_version;
 use crate::loader::load_plugin_apps_from_manifest;
 use crate::loader::load_plugin_hooks;
 use crate::loader::load_plugin_hooks_from_layer_stack;
-use crate::loader::load_plugin_mcp_servers_from_manifest_with_format;
+use crate::loader::load_plugin_mcp_discovery_from_manifest_with_format;
 use crate::loader::load_plugin_skill_inventory;
 use crate::loader::load_plugins_from_layer_stack;
 use crate::loader::log_plugin_load_errors;
@@ -493,6 +493,8 @@ pub struct PluginDetail {
     pub apps: Vec<AppConnectorId>,
     pub app_category_by_id: HashMap<String, String>,
     pub mcp_server_names: Vec<String>,
+    pub mcp_server_errors: Vec<codex_mcp::PluginMcpServerParseError>,
+    pub mcp_server_auth: Vec<codex_mcp::PluginMcpServerAuthInfo>,
     pub details_unavailable_reason: Option<PluginDetailsUnavailableReason>,
 }
 
@@ -926,6 +928,12 @@ impl PluginsManager {
                 }
                 continue;
             }
+            // Cache invalidation can race an in-flight filesystem/keyring load.
+            // It is not enough to avoid publishing that result into the cache:
+            // returning it would still let a caller project stale MCP headers.
+            if self.loaded_plugins_cache_generation() != cache_generation {
+                continue;
+            }
             log_plugin_load_errors(&plugins);
             self.cache_loaded_plugins_if_current(
                 cache_generation,
@@ -934,6 +942,9 @@ impl PluginsManager {
                 plugin_skill_snapshots,
             );
             let outcome = self.resolve_loaded_plugins_for_auth(plugins, auth_mode);
+            if self.loaded_plugins_cache_generation() != cache_generation {
+                continue;
+            }
             if *auth_change_receiver.borrow() == auth_revision {
                 cache_outcome.record();
                 return outcome;
@@ -966,6 +977,32 @@ impl PluginsManager {
             );
         }
         PluginLoadOutcome::from_plugins(plugins)
+    }
+
+    /// Store only credentials for a currently installed package. Its transport
+    /// and declaration are resolved from that package, never from RPC input.
+    pub async fn configure_plugin_mcp_api_key(
+        &self,
+        plugin_id: &str,
+        server_name: String,
+        credential: Option<codex_mcp::plugin_api_key::PluginApiKeyCredential>,
+    ) -> Result<(), String> {
+        let plugin_id = PluginId::parse(plugin_id).map_err(|_| "Invalid plugin identifier")?;
+        let root = self
+            .store
+            .active_plugin_root(&plugin_id)
+            .ok_or("Install this plugin before configuring credentials")?;
+        tokio::task::spawn_blocking(move || {
+            codex_mcp::plugin_api_key::configure_plugin_api_key(
+                root.as_path(),
+                &server_name,
+                credential.as_ref(),
+            )
+        })
+        .await
+        .map_err(|_| "Plugin credential operation failed")??;
+        self.clear_cache();
+        Ok(())
     }
 
     pub fn clear_cache(&self) {
@@ -2728,13 +2765,18 @@ impl PluginsManager {
                 apps: Vec::new(),
                 app_category_by_id: HashMap::new(),
                 mcp_server_names: Vec::new(),
+                mcp_server_errors: Vec::new(),
+                mcp_server_auth: Vec::new(),
                 details_unavailable_reason: Some(
                     PluginDetailsUnavailableReason::InstallRequiredForRemoteSource,
                 ),
             });
         }
 
-        let source_path = if plugin.source.is_install_materialized() && plugin.installed {
+        // Installed package details must read the active materialized copy. In
+        // particular, MCP credential presence is bound to this root, the same
+        // root used by the credential-write API.
+        let source_path = if plugin.installed {
             self.store.active_plugin_root(&plugin_id).ok_or_else(|| {
                 MarketplaceError::InvalidPlugin(format!(
                     "installed plugin cache entry is missing for {plugin_key}"
@@ -2817,12 +2859,8 @@ impl PluginsManager {
                 .then_some(path)
         });
         let plugin_data_root = self.store.plugin_data_root(&plugin_id);
-        let (hook_sources, _hook_load_warnings) = if manifest_format == PluginManifestFormat::Legacy
-        {
-            load_plugin_hooks(&source_path, &plugin_id, &plugin_data_root, &manifest.paths)
-        } else {
-            (Vec::new(), Vec::new())
-        };
+        let (hook_sources, _hook_load_warnings) =
+            load_plugin_hooks(&source_path, &plugin_id, &plugin_data_root, &manifest.paths);
         let hooks = plugin_hook_declarations(&hook_sources)
             .into_iter()
             .map(|hook| PluginHookSummary {
@@ -2831,14 +2869,15 @@ impl PluginsManager {
             })
             .collect();
         let auth_mode = self.auth_mode();
-        let mut app_declarations = if plugin_supports_apps(manifest_format, &plugin_id) {
-            load_plugin_apps_from_manifest(source_path.as_path(), &manifest.paths).await
-        } else {
-            Vec::new()
-        };
+        let mut app_declarations =
+            if plugin_supports_apps(manifest_format, &plugin_id, &manifest.paths) {
+                load_plugin_apps_from_manifest(source_path.as_path(), &manifest.paths).await
+            } else {
+                Vec::new()
+            };
         let mcp_data_root = (manifest_format == PluginManifestFormat::AgentPlugin)
             .then(|| self.store.mcp_data_root(&plugin_id, manifest_format));
-        let mut mcp_servers = load_plugin_mcp_servers_from_manifest_with_format(
+        let mut mcp_discovery = load_plugin_mcp_discovery_from_manifest_with_format(
             source_path.as_path(),
             &manifest.paths,
             /*plugin_policy*/ None,
@@ -2846,6 +2885,7 @@ impl PluginsManager {
             manifest_format,
         )
         .await;
+        let mut mcp_servers = std::mem::take(&mut mcp_discovery.mcp_servers);
         apply_app_mcp_routing_policy(
             &mut app_declarations,
             &mut mcp_servers,
@@ -2884,6 +2924,8 @@ impl PluginsManager {
             apps,
             app_category_by_id,
             mcp_server_names,
+            mcp_server_errors: mcp_discovery.errors,
+            mcp_server_auth: mcp_discovery.auth,
             details_unavailable_reason: None,
         })
     }

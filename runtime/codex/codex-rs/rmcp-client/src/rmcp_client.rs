@@ -14,10 +14,13 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 use std::time::Instant;
 
+use crate::oauth_private_key_jwt::OAuthPrivateKeyJwt;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
+use anyhow::bail;
 use codex_api::SharedAuthProvider;
+use codex_config::McpOAuthTokenEndpointAuthMethod;
 use codex_config::McpServerOAuthConfig;
 use codex_config::types::AuthKeyringBackendKind;
 use codex_config::types::McpServerEnvVar;
@@ -39,6 +42,8 @@ use rmcp::model::ElicitRequestParams;
 use rmcp::model::ElicitResult;
 use rmcp::model::ElicitationAction;
 use rmcp::model::Extensions;
+use rmcp::model::GetPromptRequestParams;
+use rmcp::model::GetPromptResult;
 use rmcp::model::InitializeRequestParams;
 use rmcp::model::ListResourceTemplatesRequest;
 use rmcp::model::ListResourceTemplatesResult;
@@ -68,6 +73,7 @@ use rmcp::transport::IntoTransport;
 use rmcp::transport::StreamableHttpClientTransport;
 use rmcp::transport::auth::AuthClient;
 use rmcp::transport::auth::AuthError;
+use rmcp::transport::auth::OAuthHttpClient;
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use rmcp::transport::streamable_http_client::StreamableHttpError;
 use serde::Deserialize;
@@ -99,6 +105,8 @@ use crate::oauth::validate_refresh_token_issuer;
 use crate::oauth_client_credentials::OAuthClientCredentials;
 use crate::oauth_http_client::OAuthHttpClientAdapter;
 use crate::oauth_refresh_mode::McpOAuthRefreshMode;
+use crate::oauth_token_http_client::OAuthTokenEndpointAuth;
+use crate::oauth_token_http_client::OAuthTokenHttpClient;
 use crate::ordered_byte_transport::OrderedByteTransport;
 use crate::protocol_mode::McpProtocolMode;
 use crate::request_cancellation::RequestCancellation;
@@ -178,12 +186,14 @@ enum TransportRecipe {
         http_headers: Option<HashMap<String, String>>,
         env_http_headers: Option<HashMap<String, String>>,
         oauth_config: Option<Arc<McpServerOAuthConfig>>,
+        oauth_resource: Option<String>,
         store_mode: OAuthCredentialsStoreMode,
         keyring_backend_kind: AuthKeyringBackendKind,
         pinned_credential_store: Arc<OnceLock<ResolvedOAuthCredentialStore>>,
         originator: AuthStorageOriginator,
         http_client: Arc<dyn HttpClient>,
         auth_provider: Option<SharedAuthProvider>,
+        oauth_enabled: bool,
         redirect_mode: StreamableHttpRedirectMode,
         oauth_refresh_mode: McpOAuthRefreshMode,
         initialize_deadline: Arc<StdMutex<Option<Instant>>>,
@@ -611,6 +621,7 @@ impl RmcpClient {
             http_headers,
             env_http_headers,
             /*oauth_config*/ None,
+            /*oauth_resource*/ None,
             store_mode,
             keyring_backend_kind,
             http_client,
@@ -630,10 +641,49 @@ impl RmcpClient {
         http_headers: Option<HashMap<String, String>>,
         env_http_headers: Option<HashMap<String, String>>,
         oauth_config: Option<McpServerOAuthConfig>,
+        oauth_resource: Option<String>,
         store_mode: OAuthCredentialsStoreMode,
         keyring_backend_kind: AuthKeyringBackendKind,
         http_client: Arc<dyn HttpClient>,
         auth_provider: Option<SharedAuthProvider>,
+        protocol_mode: McpProtocolMode,
+        redirect_mode: StreamableHttpRedirectMode,
+        oauth_refresh_mode: McpOAuthRefreshMode,
+    ) -> Result<Self> {
+        Self::new_streamable_http_client_with_auth_policy(
+            server_name,
+            url,
+            bearer_token,
+            http_headers,
+            env_http_headers,
+            oauth_config,
+            oauth_resource,
+            store_mode,
+            keyring_backend_kind,
+            http_client,
+            auth_provider,
+            /*oauth_enabled*/ true,
+            protocol_mode,
+            redirect_mode,
+            oauth_refresh_mode,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn new_streamable_http_client_with_auth_policy(
+        server_name: &str,
+        url: &str,
+        bearer_token: Option<StreamableHttpBearerToken>,
+        http_headers: Option<HashMap<String, String>>,
+        env_http_headers: Option<HashMap<String, String>>,
+        oauth_config: Option<McpServerOAuthConfig>,
+        oauth_resource: Option<String>,
+        store_mode: OAuthCredentialsStoreMode,
+        keyring_backend_kind: AuthKeyringBackendKind,
+        http_client: Arc<dyn HttpClient>,
+        auth_provider: Option<SharedAuthProvider>,
+        oauth_enabled: bool,
         protocol_mode: McpProtocolMode,
         redirect_mode: StreamableHttpRedirectMode,
         oauth_refresh_mode: McpOAuthRefreshMode,
@@ -645,12 +695,14 @@ impl RmcpClient {
             http_headers,
             env_http_headers,
             oauth_config: oauth_config.map(Arc::new),
+            oauth_resource,
             store_mode,
             keyring_backend_kind,
             pinned_credential_store: Arc::new(OnceLock::new()),
             originator: AuthStorageOriginator::current(),
             http_client,
             auth_provider,
+            oauth_enabled,
             redirect_mode,
             oauth_refresh_mode,
             initialize_deadline: Arc::new(StdMutex::new(None)),
@@ -927,6 +979,91 @@ impl RmcpClient {
                 }
                 .boxed()
             })
+            .await?;
+        self.persist_oauth_tokens().await;
+        Ok(result)
+    }
+
+    pub async fn get_prompt(
+        &self,
+        mut params: GetPromptRequestParams,
+        timeout: Option<Duration>,
+    ) -> Result<GetPromptResult> {
+        params.meta = crate::trace_context::with_current_trace(params.meta);
+        self.refresh_oauth_if_needed().await?;
+        let cancellation = self.request_cancellation();
+        let requested_modern = self.protocol_mode != McpProtocolMode::Legacy;
+        let result = self
+            .run_service_operation("prompts/get", timeout, move |service| {
+                let params = params.clone();
+                async move {
+                    let modern_session = requested_modern
+                        && service.peer().peer_info().is_some_and(|info| {
+                            info.protocol_version == ProtocolVersion::V_2026_07_28
+                        });
+                    if modern_session {
+                        return crate::request_input::get_prompt(
+                            &service,
+                            service.service(),
+                            params,
+                            cancellation,
+                        )
+                        .await;
+                    }
+                    service.get_prompt(params).await
+                }
+                .boxed()
+            })
+            .await?;
+        self.persist_oauth_tokens().await;
+        Ok(result)
+    }
+
+    /// Retrieves a prompt with input requests and timeout pauses owned by the calling chat.
+    pub async fn get_prompt_with_elicitation(
+        &self,
+        mut params: GetPromptRequestParams,
+        timeout: Option<Duration>,
+        send_elicitation: Arc<SendElicitation>,
+    ) -> Result<GetPromptResult> {
+        params.meta = crate::trace_context::with_current_trace(params.meta);
+        self.refresh_oauth_if_needed().await?;
+        let cancellation = self.request_cancellation();
+        let requested_modern = self.protocol_mode != McpProtocolMode::Legacy;
+        let pause_state = ElicitationPauseState::new();
+        let result = self
+            .run_service_operation_with_pause_state(
+                "prompts/get",
+                timeout,
+                pause_state.clone(),
+                move |service| {
+                    let params = params.clone();
+                    let send_elicitation = Arc::clone(&send_elicitation);
+                    let pause_state = pause_state.clone();
+                    async move {
+                        let modern_session = requested_modern
+                            && service.peer().peer_info().is_some_and(|info| {
+                                info.protocol_version == ProtocolVersion::V_2026_07_28
+                            });
+                        if !modern_session {
+                            return Err(ServiceError::McpError(rmcp::ErrorData::invalid_request(
+                                "request-scoped MCP inputs require protocol 2026-07-28",
+                                /*data*/ None,
+                            )));
+                        }
+                        let input_service =
+                            service.service().for_request(send_elicitation, pause_state);
+                        crate::request_input::get_prompt(
+                            &service,
+                            &input_service,
+                            params,
+                            cancellation,
+                        )
+                        .await
+                    }
+                    .boxed()
+                },
+            )
             .await?;
         self.persist_oauth_tokens().await;
         Ok(result)
@@ -1382,12 +1519,14 @@ impl RmcpClient {
                 http_headers,
                 env_http_headers,
                 oauth_config,
+                oauth_resource,
                 store_mode,
                 keyring_backend_kind,
                 pinned_credential_store,
                 originator,
                 http_client,
                 auth_provider,
+                oauth_enabled,
                 redirect_mode,
                 oauth_refresh_mode,
                 initialize_deadline,
@@ -1410,7 +1549,8 @@ impl RmcpClient {
                         auth_provider.clone()
                     };
 
-                let resolved_oauth_tokens = if bearer_token.is_none()
+                let resolved_oauth_tokens = if *oauth_enabled
+                    && bearer_token.is_none()
                     && auth_provider.is_none()
                     && !default_headers.contains_key(AUTHORIZATION)
                 {
@@ -1488,6 +1628,7 @@ impl RmcpClient {
                         *oauth_refresh_mode,
                         Arc::clone(initialize_deadline),
                         oauth_config.as_deref(),
+                        oauth_resource.as_deref(),
                     )
                     .await
                     {
@@ -1985,25 +2126,125 @@ async fn create_oauth_transport_and_runtime(
     oauth_refresh_mode: McpOAuthRefreshMode,
     initialize_deadline: Arc<StdMutex<Option<Instant>>>,
     oauth_config: Option<&McpServerOAuthConfig>,
+    oauth_resource: Option<&str>,
 ) -> Result<PendingTransport> {
-    OAuthClientCredentials::resolve(oauth_config)?
-        .validate_stored_client_id(&initial_tokens.client_id)?;
-    let oauth_http_client = Arc::new(OAuthHttpClientAdapter::new_with_redirect_mode(
-        http_client.clone(),
-        default_headers.clone(),
-        url,
-        has_configured_headers,
-        redirect_mode,
-    )?);
-    let mut manager =
-        AuthorizationManager::new_with_oauth_http_client(url.to_string(), oauth_http_client)
-            .await?;
-    manager.set_allow_missing_issuer(true);
-    let metadata = manager
-        .resolve_metadata()
-        .await
-        .context("failed to resolve OAuth metadata before using stored credentials")?
-        .metadata;
+    let credentials = OAuthClientCredentials::resolve(oauth_config)?;
+    credentials.validate_stored_client_id(&initial_tokens.client_id)?;
+    let metadata_overrides =
+        crate::oauth_metadata_config::from_config(oauth_config, oauth_resource)?;
+    let resource_url = url::Url::parse(url).context("invalid MCP OAuth resource URL")?;
+    let effective_resource = metadata_overrides.effective_resource(&resource_url);
+    let oauth_http_client: Arc<dyn OAuthHttpClient> =
+        metadata_overrides.wrap_http_client(Arc::new(
+            OAuthHttpClientAdapter::new_with_redirect_mode(
+                http_client.clone(),
+                default_headers.clone(),
+                url,
+                has_configured_headers,
+                redirect_mode,
+            )?
+            .with_oidc_discovery_enabled(metadata_overrides.oidc_discovery_enabled())
+            .with_oidc_configuration_url(metadata_overrides.oidc_configuration_url().cloned()),
+        ));
+    let discovery_base = metadata_overrides
+        .metadata_discovery_base(&resource_url)
+        .to_string();
+    let mut discovery_manager = AuthorizationManager::new_with_oauth_http_client(
+        discovery_base.clone(),
+        Arc::clone(&oauth_http_client),
+    )
+    .await?;
+    discovery_manager.set_allow_missing_issuer(true);
+    let discovered_metadata = match discovery_manager.resolve_metadata().await {
+        Ok(resolved) => Some(resolved.metadata),
+        Err(error) => {
+            if metadata_overrides.apply_to_metadata(None).is_err() {
+                return Err(error)
+                    .context("failed to resolve OAuth metadata before using stored credentials");
+            }
+            None
+        }
+    };
+    let metadata = metadata_overrides.apply_to_metadata(discovered_metadata)?;
+    let token_endpoint = url::Url::parse(&metadata.token_endpoint)
+        .context("OAuth metadata contains an invalid token endpoint")?;
+    let explicit_token_auth = oauth_config
+        .and_then(|config| config.client_token_endpoint_auth_method)
+        .or_else(|| {
+            if oauth_config
+                .and_then(|config| config.private_key_jwt.as_ref())
+                .is_some()
+            {
+                Some(McpOAuthTokenEndpointAuthMethod::PrivateKeyJwt)
+            } else {
+                credentials
+                    .client_secret
+                    .as_ref()
+                    .map(|_| McpOAuthTokenEndpointAuthMethod::ClientSecretBasic)
+            }
+        });
+    let mut manager = if let Some(method) = explicit_token_auth {
+        let auth = match method {
+            McpOAuthTokenEndpointAuthMethod::None => OAuthTokenEndpointAuth::Public,
+            McpOAuthTokenEndpointAuthMethod::ClientSecretBasic => {
+                let secret = credentials.client_secret.as_ref().ok_or_else(|| {
+                    anyhow!("OAuth client_secret_basic requires a configured client secret")
+                })?;
+                OAuthTokenEndpointAuth::ClientSecretBasic(secret.secret().to_string())
+            }
+            McpOAuthTokenEndpointAuthMethod::ClientSecretPost => {
+                let secret = credentials.client_secret.as_ref().ok_or_else(|| {
+                    anyhow!("OAuth client_secret_post requires a configured client secret")
+                })?;
+                OAuthTokenEndpointAuth::ClientSecretPost(secret.secret().to_string())
+            }
+            McpOAuthTokenEndpointAuthMethod::PrivateKeyJwt => {
+                let private_key = oauth_config
+                    .and_then(|config| config.private_key_jwt.as_ref())
+                    .ok_or_else(|| {
+                        anyhow!("OAuth private_key_jwt requires a configured signing key")
+                    })?;
+                OAuthTokenEndpointAuth::PrivateKeyJwt(Arc::new(OAuthPrivateKeyJwt::new(
+                    initial_tokens.client_id.clone(),
+                    &token_endpoint,
+                    &private_key.algorithm,
+                    private_key.private_key.as_str(),
+                    private_key.key_id.clone(),
+                )?))
+            }
+        };
+        let token_http = OAuthTokenHttpClient::new(
+            oauth_http_client,
+            token_endpoint,
+            initial_tokens.client_id.clone(),
+            auth,
+            effective_resource.as_ref().map(ToString::to_string),
+        )?;
+        let mut manager = AuthorizationManager::new_with_oauth_http_client(
+            discovery_base.clone(),
+            Arc::new(token_http),
+        )
+        .await?;
+        manager.set_allow_missing_issuer(true);
+        manager.set_metadata(metadata.clone());
+        manager
+    } else if let Some(resource) = effective_resource.as_ref() {
+        let token_http = OAuthTokenHttpClient::for_discovered_client(
+            oauth_http_client,
+            token_endpoint,
+            Some(resource.to_string()),
+        )?;
+        let mut manager = AuthorizationManager::new_with_oauth_http_client(
+            discovery_base.clone(),
+            Arc::new(token_http),
+        )
+        .await?;
+        manager.set_allow_missing_issuer(true);
+        manager.set_metadata(metadata.clone());
+        manager
+    } else {
+        discovery_manager
+    };
     let use_stored_access_token_only =
         match validate_refresh_token_issuer(&metadata, &initial_tokens) {
             Ok(()) => false,

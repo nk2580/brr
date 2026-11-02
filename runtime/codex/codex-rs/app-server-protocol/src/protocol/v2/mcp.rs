@@ -150,6 +150,88 @@ pub struct McpResourceReadResponse {
     pub origin_call_id: Option<String>,
 }
 
+/// Lists the prompts exposed by one configured MCP server.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct McpServerPromptsListParams {
+    pub server: String,
+    #[ts(optional = nullable)]
+    pub thread_id: Option<String>,
+    #[ts(optional = nullable)]
+    pub cursor: Option<String>,
+}
+
+/// MCP prompt catalog page. Prompt entries are retained as raw JSON so server extensions survive.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct McpServerPromptsListResponse {
+    pub prompts: Vec<JsonValue>,
+    pub next_cursor: Option<String>,
+    #[serde(flatten)]
+    #[ts(skip)]
+    pub extra: BTreeMap<String, JsonValue>,
+}
+
+/// Requests one named prompt from a configured MCP server.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct McpServerPromptGetParams {
+    pub server: String,
+    #[ts(optional = nullable)]
+    pub thread_id: Option<String>,
+    pub name: String,
+    #[ts(optional = nullable)]
+    pub arguments: Option<BTreeMap<String, String>>,
+}
+
+/// Prompt messages remain raw MCP JSON blocks to preserve text, image and embedded-resource forms.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct McpServerPromptGetResponse {
+    #[ts(optional = nullable)]
+    pub result_type: Option<String>,
+    #[ts(optional = nullable)]
+    pub description: Option<String>,
+    pub messages: Vec<JsonValue>,
+    #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
+    #[ts(rename = "_meta", optional = nullable)]
+    pub meta: Option<JsonValue>,
+    #[serde(flatten)]
+    #[ts(skip)]
+    pub extra: BTreeMap<String, JsonValue>,
+}
+
+/// Requests completion suggestions for a prompt or resource reference.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct McpServerCompletionCompleteParams {
+    pub server: String,
+    #[ts(optional = nullable)]
+    pub thread_id: Option<String>,
+    #[serde(rename = "ref")]
+    #[ts(rename = "ref")]
+    pub reference: JsonValue,
+    pub argument: JsonValue,
+    #[ts(optional = nullable)]
+    pub context: Option<JsonValue>,
+}
+
+/// MCP completion result. The completion object and extension fields are preserved verbatim.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct McpServerCompletionCompleteResponse {
+    pub completion: JsonValue,
+    #[serde(flatten)]
+    #[ts(skip)]
+    pub extra: BTreeMap<String, JsonValue>,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]

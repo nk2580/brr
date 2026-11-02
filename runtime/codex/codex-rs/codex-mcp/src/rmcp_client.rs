@@ -1480,6 +1480,7 @@ pub(crate) async fn make_rmcp_client(
         resolved_environment.map_err(|err| StartupOutcomeError::from(anyhow!(err)))?;
     let is_local_environment = config.is_local_environment();
     let oauth_credential_name = config.oauth_credential_name(server_name);
+    let oauth_enabled = !matches!(config.auth, McpServerAuth::None);
     let McpServerConfig { transport, .. } = config;
 
     match transport {
@@ -1581,17 +1582,19 @@ pub(crate) async fn make_rmcp_client(
             } else {
                 StreamableHttpRedirectMode::Legacy
             };
-            RmcpClient::new_streamable_http_client_with_protocol_mode_and_redirect_mode(
+            RmcpClient::new_streamable_http_client_with_auth_policy(
                 oauth_credential_name.as_ref(),
                 &url,
                 resolved_bearer_token,
                 http_headers,
                 env_http_headers,
                 server.config().oauth.clone(),
+                server.config().oauth_resource.clone(),
                 store_mode,
                 keyring_backend_kind,
                 http_client,
                 runtime_auth_provider,
+                oauth_enabled,
                 protocol_mode,
                 redirect_mode,
                 oauth_refresh_mode,

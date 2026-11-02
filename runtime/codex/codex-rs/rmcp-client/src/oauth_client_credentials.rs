@@ -14,6 +14,7 @@ use rmcp::transport::auth::OAuthClientConfig;
 pub(crate) struct OAuthClientCredentials {
     pub(crate) client_id: Option<String>,
     pub(crate) client_secret: Option<ClientSecret>,
+    has_private_key_jwt: bool,
 }
 
 impl OAuthClientCredentials {
@@ -24,6 +25,9 @@ impl OAuthClientCredentials {
         let client_secret = config
             .and_then(|config| config.client_secret.as_ref())
             .map(|secret| ClientSecret::new(secret.to_string()));
+        let has_private_key_jwt = config
+            .and_then(|config| config.private_key_jwt.as_ref())
+            .is_some();
         if client_secret.is_some() && client_id.is_none() {
             bail!("MCP OAuth client_secret requires a nonempty client_id");
         }
@@ -36,11 +40,16 @@ impl OAuthClientCredentials {
         Ok(Self {
             client_id,
             client_secret,
+            has_private_key_jwt,
         })
     }
 
     pub(crate) fn validate_stored_client_id(&self, stored_client_id: &str) -> Result<()> {
-        if self.client_secret.is_some() && self.client_id.as_deref() != Some(stored_client_id) {
+        let has_explicit_client = self.client_id.is_some();
+        let has_registered_credential = self.client_secret.is_some() || self.has_private_key_jwt;
+        if (has_explicit_client || has_registered_credential)
+            && self.client_id.as_deref() != Some(stored_client_id)
+        {
             return Err(AuthError::AuthorizationRequired).context(
                 "Configured MCP OAuth client ID differs from stored credentials; log in again",
             );

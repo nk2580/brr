@@ -1,0 +1,24 @@
+[package]
+name = "brr-extension-behavior-tests"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+codex-keyring-store = { path = "../../codex/codex-rs/keyring-store" }
+codex-utils-redacted-string = { path = "../../codex/codex-rs/utils/redacted-string" }
+http = "1"
+jsonwebtoken = "9.3.1"
+rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk", rev = "98a54789b80110ad210495c4ad845c89e1980471", version = "=3.5.1", default-features = false, features = ["auth-enterprise-managed", "client", "transport-streamable-http-client"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+url = "2"
+uuid = { version = "1", features = ["v4"] }
+
+[profile.dev]
+debug = 0
+incremental = false

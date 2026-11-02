@@ -1,7 +1,15 @@
 use super::PluginMcpConfigParseOutcome;
+use super::PluginMcpServerAuthInfo;
 use super::PluginMcpServerParseError;
+use crate::plugin_api_key::{
+    PluginApiKeyDeclaration, plugin_api_key_header, plugin_mcp_credential_configured,
+    plugin_oauth_client_secret, plugin_oauth_private_key_jwt,
+};
+use codex_config::McpOAuthClientRegistrationMode;
+use codex_config::McpOAuthTokenEndpointAuthMethod;
 use codex_config::McpServerConfig;
 use serde::Deserialize;
+use serde::Serialize;
 use serde_json::Map as JsonMap;
 use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
@@ -54,11 +62,15 @@ enum AgentPluginMcpServer {
         #[serde(default)]
         env: BTreeMap<String, String>,
         cwd: Option<String>,
+        #[serde(default)]
+        extensions: Option<AgentPluginMcpExtensions>,
     },
     #[serde(rename = "streamable-http")]
     StreamableHttp {
         url: String,
         headers: Option<BTreeMap<String, String>>,
+        #[serde(default)]
+        extensions: Option<AgentPluginMcpExtensions>,
     },
     #[serde(rename = "sse")]
     Sse {
@@ -66,7 +78,53 @@ enum AgentPluginMcpServer {
         _url: String,
         #[serde(rename = "headers")]
         _headers: Option<BTreeMap<String, String>>,
+        #[serde(default)]
+        _extensions: Option<AgentPluginMcpExtensions>,
     },
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct AgentPluginMcpExtensions {
+    #[serde(rename = "com.openai")]
+    com_openai: Option<AgentPluginOpenAiMcpExtensions>,
+    #[serde(flatten)]
+    _other_extensions: BTreeMap<String, JsonValue>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AgentPluginOpenAiMcpExtensions {
+    auth: Option<AgentPluginMcpAuth>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AgentPluginMcpAuth {
+    #[serde(rename = "type")]
+    auth_type: String,
+    client: Option<AgentPluginMcpOAuthClient>,
+    authorization_url: Option<String>,
+    token_url: Option<String>,
+    registration_url: Option<String>,
+    authorization_server_base: Option<String>,
+    resource: Option<String>,
+    base_scopes: Option<Vec<String>>,
+    default_scopes: Option<Vec<String>>,
+    oidc_enabled: Option<bool>,
+    oidc_configuration_url: Option<String>,
+    oidc_userinfo_endpoint: Option<String>,
+    oidc_scopes_supported: Option<Vec<String>>,
+    header_scheme: Option<String>,
+    header_name: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AgentPluginMcpOAuthClient {
+    mode: String,
+    client_id: Option<String>,
+    token_endpoint_auth_method: Option<String>,
 }
 
 /// Translates an Agent Plugins `mcp.json` into Codex MCP configuration.
@@ -96,22 +154,109 @@ fn parse_agent_plugin_mcp_config_from(
 
     let mut outcome = PluginMcpConfigParseOutcome::default();
     for (name, value) in mcp_servers {
-        match normalize_agent_plugin_mcp_server(value, plugin_root, plugin_data_root) {
+        let raw_auth_descriptor = value.pointer("/extensions/com.openai/auth").cloned();
+        let auth_descriptor = sanitized_auth_descriptor(&value);
+        if let Some(auth_descriptor) = auth_descriptor.clone() {
+            let credential_configured = raw_auth_descriptor.as_ref().is_some_and(|auth| {
+                requires_stored_credential(auth)
+                    && value
+                        .get("url")
+                        .and_then(JsonValue::as_str)
+                        .is_some_and(|url| {
+                            plugin_mcp_credential_configured(plugin_root, &name, url, auth)
+                                .unwrap_or(false)
+                        })
+            });
+            outcome.auth.push(PluginMcpServerAuthInfo {
+                name: name.clone(),
+                auth_descriptor: Some(auth_descriptor),
+                credential_configured,
+            });
+        }
+        match normalize_agent_plugin_mcp_server(
+            &name,
+            value,
+            plugin_root,
+            plugin_data_root,
+            raw_auth_descriptor.as_ref(),
+        ) {
             Ok(config) => {
                 outcome.servers.insert(name, config);
             }
-            Err(message) => outcome
-                .errors
-                .push(PluginMcpServerParseError { name, message }),
+            Err(message) => outcome.errors.push(PluginMcpServerParseError {
+                name,
+                message,
+                auth_descriptor,
+            }),
         }
     }
     Ok(outcome)
 }
 
+fn requires_stored_credential(auth: &JsonValue) -> bool {
+    match auth.get("type").and_then(JsonValue::as_str) {
+        Some("api_key") => true,
+        Some("oauth" | "mixed") => {
+            auth.pointer("/client/mode").and_then(JsonValue::as_str) == Some("provided")
+                && matches!(
+                    auth.pointer("/client/tokenEndpointAuthMethod")
+                        .and_then(JsonValue::as_str),
+                    Some("client_secret_basic" | "client_secret_post" | "private_key_jwt")
+                )
+        }
+        _ => false,
+    }
+}
+
+fn sanitized_auth_descriptor(value: &JsonValue) -> Option<JsonValue> {
+    let descriptor = value.pointer("/extensions/com.openai/auth")?.clone();
+    let mut auth = serde_json::from_value::<AgentPluginMcpAuth>(descriptor).ok()?;
+    for endpoint in [
+        &mut auth.authorization_url,
+        &mut auth.token_url,
+        &mut auth.registration_url,
+        &mut auth.authorization_server_base,
+        &mut auth.resource,
+        &mut auth.oidc_configuration_url,
+        &mut auth.oidc_userinfo_endpoint,
+    ] {
+        if let Some(endpoint) = endpoint {
+            let mut parsed = url::Url::parse(endpoint).ok()?;
+            if !parsed.username().is_empty() || parsed.password().is_some() {
+                parsed.set_username("").ok()?;
+                parsed.set_password(None).ok()?;
+            }
+            // Auth metadata is display-only for unsupported flows. Drop all query
+            // and fragment data so tokens and provider-specific secrets cannot escape.
+            parsed.set_query(None);
+            parsed.set_fragment(None);
+            *endpoint = parsed.to_string();
+        }
+    }
+    let mut descriptor = serde_json::to_value(auth).ok()?;
+    if let Some(server_url) = value.get("url").and_then(JsonValue::as_str)
+        && let Ok(mut parsed) = url::Url::parse(server_url)
+    {
+        if !parsed.username().is_empty() || parsed.password().is_some() {
+            parsed.set_username("").ok()?;
+            parsed.set_password(None).ok()?;
+        }
+        parsed.set_query(None);
+        parsed.set_fragment(None);
+        descriptor.as_object_mut()?.insert(
+            "serverUrl".to_string(),
+            JsonValue::String(parsed.to_string()),
+        );
+    }
+    Some(descriptor)
+}
+
 fn normalize_agent_plugin_mcp_server(
+    server_name: &str,
     value: JsonValue,
     plugin_root: &Path,
     plugin_data_root: &Path,
+    auth_descriptor: Option<&JsonValue>,
 ) -> Result<McpServerConfig, String> {
     let object = value
         .as_object()
@@ -123,28 +268,351 @@ fn normalize_agent_plugin_mcp_server(
     }
     let server =
         serde_json::from_value::<AgentPluginMcpServer>(value).map_err(|err| err.to_string())?;
-    let object = match server {
+    let (mut object, extensions) = match server {
         AgentPluginMcpServer::Stdio {
             command,
             args,
             env,
             cwd,
-        } => normalize_agent_plugin_stdio_server(
-            command,
-            args,
-            env,
-            cwd,
-            plugin_root,
-            plugin_data_root,
-        )?,
-        AgentPluginMcpServer::StreamableHttp { url, headers } => {
-            normalize_agent_plugin_http_server(url, headers)?
-        }
+            extensions,
+        } => (
+            normalize_agent_plugin_stdio_server(
+                command,
+                args,
+                env,
+                cwd,
+                plugin_root,
+                plugin_data_root,
+            )?,
+            extensions,
+        ),
+        AgentPluginMcpServer::StreamableHttp {
+            url,
+            headers,
+            extensions,
+        } => (
+            normalize_agent_plugin_http_server(url, headers)?,
+            extensions,
+        ),
         AgentPluginMcpServer::Sse { .. } => {
             return Err("Agent Plugins legacy SSE transport is not supported by Codex".to_string());
         }
     };
+    apply_agent_plugin_auth(
+        server_name,
+        plugin_root,
+        &mut object,
+        extensions,
+        auth_descriptor,
+    )?;
     serde_json::from_value(JsonValue::Object(object)).map_err(|err| err.to_string())
+}
+
+fn apply_agent_plugin_auth(
+    server_name: &str,
+    plugin_root: &Path,
+    server: &mut JsonMap<String, JsonValue>,
+    extensions: Option<AgentPluginMcpExtensions>,
+    auth_descriptor: Option<&JsonValue>,
+) -> Result<(), String> {
+    let Some(auth) = extensions
+        .and_then(|extensions| extensions.com_openai)
+        .and_then(|extensions| extensions.auth)
+    else {
+        return Ok(());
+    };
+
+    match auth.auth_type.as_str() {
+        "api_key" => {
+            if auth.client.is_some()
+                || auth.authorization_url.is_some()
+                || auth.token_url.is_some()
+                || auth.registration_url.is_some()
+                || auth.authorization_server_base.is_some()
+                || auth.resource.is_some()
+                || auth.base_scopes.is_some()
+                || auth.default_scopes.is_some()
+                || auth.oidc_enabled.is_some()
+                || auth.oidc_configuration_url.is_some()
+                || auth.oidc_userinfo_endpoint.is_some()
+                || auth.oidc_scopes_supported.is_some()
+            {
+                return Err("API-key auth cannot include OAuth client, endpoint, resource, or scope settings".to_string());
+            }
+            let url = server
+                .get("url")
+                .and_then(JsonValue::as_str)
+                .ok_or_else(|| {
+                    "API-key authentication is only supported for HTTP MCP servers".to_string()
+                })?;
+            let declaration = PluginApiKeyDeclaration {
+                url: url.to_string(),
+                header_scheme: auth
+                    .header_scheme
+                    .clone()
+                    .ok_or_else(|| "API-key auth requires headerScheme".to_string())?,
+                header_name: auth.header_name.clone(),
+            };
+            let (header_name, header_value) =
+                plugin_api_key_header(plugin_root, server_name, &declaration)?;
+            let headers = server
+                .entry("http_headers".to_string())
+                .or_insert_with(|| JsonValue::Object(JsonMap::new()))
+                .as_object_mut()
+                .ok_or_else(|| "Invalid normalized API-key headers".to_string())?;
+            headers.retain(|name, _| !name.eq_ignore_ascii_case(&header_name));
+            headers.insert(header_name, JsonValue::String(header_value));
+            server.insert("auth".to_string(), JsonValue::String("none".to_string()));
+        }
+        "none" => {
+            if auth.client.is_some()
+                || auth.authorization_url.is_some()
+                || auth.token_url.is_some()
+                || auth.registration_url.is_some()
+                || auth.authorization_server_base.is_some()
+                || auth.resource.is_some()
+                || auth.base_scopes.is_some()
+                || auth.default_scopes.is_some()
+                || auth.oidc_enabled.is_some()
+                || auth.oidc_configuration_url.is_some()
+                || auth.oidc_userinfo_endpoint.is_some()
+                || auth.oidc_scopes_supported.is_some()
+                || auth.header_scheme.is_some()
+                || auth.header_name.is_some()
+            {
+                return Err("auth.type `none` cannot include OAuth or API-key settings".to_string());
+            }
+            // Stdio has no HTTP authentication policy in the runtime config.
+            // Omitting `auth = none` preserves its meaning (credentials are not
+            // used) without asking the shared MCP config parser to accept HTTP
+            // auth fields on a stdio transport.
+            if server.contains_key("url") {
+                server.insert("auth".to_string(), JsonValue::String("none".to_string()));
+            }
+        }
+        "oauth" | "mixed" => {
+            if !server.contains_key("url") {
+                return Err(
+                    "OAuth authentication is only supported for HTTP MCP servers".to_string(),
+                );
+            }
+            if auth.header_scheme.is_some() || auth.header_name.is_some() {
+                return Err("OAuth auth cannot include API-key header settings".to_string());
+            }
+            let mut oauth = JsonMap::new();
+            let mut use_oauth_authentication = true;
+            let mut client_registration = None;
+            if let Some(client) = auth.client {
+                match client.mode.as_str() {
+                    "provided" => {
+                        let client_id = client
+                            .client_id
+                            .filter(|client_id| !client_id.trim().is_empty())
+                            .ok_or_else(|| {
+                                "OAuth provided client requires a non-empty clientId".to_string()
+                            })?;
+                        if let Some(method) = client.token_endpoint_auth_method.as_deref() {
+                            let method = match method {
+                                "none" => McpOAuthTokenEndpointAuthMethod::None,
+                                "client_secret_basic" => {
+                                    McpOAuthTokenEndpointAuthMethod::ClientSecretBasic
+                                }
+                                "client_secret_post" => {
+                                    McpOAuthTokenEndpointAuthMethod::ClientSecretPost
+                                }
+                                "private_key_jwt" => McpOAuthTokenEndpointAuthMethod::PrivateKeyJwt,
+                                unsupported => {
+                                    return Err(format!(
+                                        "OAuth token endpoint auth method `{unsupported}` is not supported"
+                                    ));
+                                }
+                            };
+                            oauth.insert(
+                                "client_token_endpoint_auth_method".to_string(),
+                                serde_json::to_value(method)
+                                    .expect("token endpoint method serializes"),
+                            );
+                            match method {
+                                McpOAuthTokenEndpointAuthMethod::ClientSecretBasic
+                                | McpOAuthTokenEndpointAuthMethod::ClientSecretPost => {
+                                    let descriptor = auth_descriptor.ok_or_else(|| {
+                                        "OAuth client secret setup requires a valid auth declaration"
+                                            .to_string()
+                                    })?;
+                                    let url = server
+                                        .get("url")
+                                        .and_then(JsonValue::as_str)
+                                        .ok_or_else(|| {
+                                            "OAuth client secret is only supported for HTTP MCP servers"
+                                                .to_string()
+                                        })?;
+                                    match plugin_oauth_client_secret(
+                                        plugin_root,
+                                        server_name,
+                                        url,
+                                        descriptor,
+                                    ) {
+                                        Ok(secret) => {
+                                            oauth.insert(
+                                                "client_secret".to_string(),
+                                                JsonValue::String(secret.as_str().to_string()),
+                                            );
+                                        }
+                                        Err(_) if auth.auth_type == "mixed" => {
+                                            // Mixed packages promise an unauthenticated public
+                                            // surface as well as OAuth. Keep that surface usable
+                                            // until the user configures the confidential client.
+                                            use_oauth_authentication = false;
+                                        }
+                                        Err(error) => return Err(error),
+                                    }
+                                }
+                                McpOAuthTokenEndpointAuthMethod::PrivateKeyJwt => {
+                                    let descriptor = auth_descriptor.ok_or_else(|| {
+                                        "OAuth private-key JWT setup requires a valid auth declaration"
+                                            .to_string()
+                                    })?;
+                                    let url = server
+                                        .get("url")
+                                        .and_then(JsonValue::as_str)
+                                        .ok_or_else(|| {
+                                            "OAuth private-key JWT is only supported for HTTP MCP servers"
+                                                .to_string()
+                                        })?;
+                                    match plugin_oauth_private_key_jwt(
+                                        plugin_root,
+                                        server_name,
+                                        url,
+                                        descriptor,
+                                    ) {
+                                        Ok((private_key, algorithm, key_id)) => {
+                                            oauth.insert(
+                                                "private_key_jwt".to_string(),
+                                                serde_json::json!({
+                                                    "private_key": private_key.as_str(),
+                                                    "algorithm": algorithm,
+                                                    "key_id": key_id,
+                                                }),
+                                            );
+                                        }
+                                        Err(_) if auth.auth_type == "mixed" => {
+                                            use_oauth_authentication = false;
+                                        }
+                                        Err(error) => return Err(error),
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        oauth.insert("client_id".to_string(), JsonValue::String(client_id));
+                    }
+                    "dcr" => {
+                        if client.client_id.is_some() || client.token_endpoint_auth_method.is_some()
+                        {
+                            return Err(
+                                "OAuth dcr client cannot include clientId or tokenEndpointAuthMethod"
+                                    .to_string(),
+                            );
+                        }
+                        client_registration = Some(McpOAuthClientRegistrationMode::Dcr);
+                    }
+                    "cimd" => {
+                        if client.client_id.is_some() || client.token_endpoint_auth_method.is_some()
+                        {
+                            return Err(
+                                "OAuth cimd client cannot include clientId or tokenEndpointAuthMethod"
+                                    .to_string(),
+                            );
+                        }
+                        // CIMD is a preference, with DCR fallback when Brr has no
+                        // host-owned native client metadata document configured.
+                        client_registration = Some(McpOAuthClientRegistrationMode::Auto);
+                    }
+                    mode => {
+                        return Err(format!(
+                            "OAuth client mode `{mode}` must be provided, dcr, or cimd"
+                        ));
+                    }
+                }
+            }
+            for (field, scopes) in [
+                ("baseScopes", auth.base_scopes.as_ref()),
+                ("defaultScopes", auth.default_scopes.as_ref()),
+            ] {
+                if scopes.is_some_and(|scopes| scopes.iter().any(|scope| scope.trim().is_empty())) {
+                    return Err(format!("OAuth {field} must not contain empty values"));
+                }
+            }
+            if let Some(scopes) = auth.base_scopes {
+                oauth.insert(
+                    "base_scopes".to_string(),
+                    JsonValue::Array(scopes.into_iter().map(JsonValue::String).collect()),
+                );
+            }
+            if let Some(scopes) = auth.default_scopes {
+                oauth.insert(
+                    "default_scopes".to_string(),
+                    JsonValue::Array(scopes.into_iter().map(JsonValue::String).collect()),
+                );
+            }
+            for (key, value) in [
+                ("authorization_server_base", auth.authorization_server_base),
+                ("authorization_url", auth.authorization_url),
+                ("token_url", auth.token_url),
+                ("registration_url", auth.registration_url),
+                ("oidc_configuration_url", auth.oidc_configuration_url),
+                ("oidc_userinfo_endpoint", auth.oidc_userinfo_endpoint),
+            ] {
+                if let Some(value) = value {
+                    oauth.insert(key.to_string(), JsonValue::String(value));
+                }
+            }
+            if let Some(enabled) = auth.oidc_enabled {
+                oauth.insert("oidc_enabled".to_string(), JsonValue::Bool(enabled));
+            }
+            if let Some(scopes) = auth.oidc_scopes_supported {
+                oauth.insert(
+                    "oidc_scopes_supported".to_string(),
+                    JsonValue::Array(scopes.into_iter().map(JsonValue::String).collect()),
+                );
+            }
+            if let Some(registration) = client_registration {
+                oauth.insert(
+                    "client_registration".to_string(),
+                    serde_json::to_value(registration).expect("registration mode serializes"),
+                );
+            }
+            if let Some(resource) = auth.resource {
+                let parsed = url::Url::parse(&resource)
+                    .map_err(|_| "OAuth resource must be an absolute URL".to_string())?;
+                if !matches!(parsed.scheme(), "http" | "https")
+                    || !parsed.username().is_empty()
+                    || parsed.password().is_some()
+                    || parsed.fragment().is_some()
+                {
+                    return Err(
+                        "OAuth resource must be an HTTP(S) URL without credentials or fragment"
+                            .to_string(),
+                    );
+                }
+                server.insert("oauth_resource".to_string(), JsonValue::String(resource));
+            }
+            if use_oauth_authentication {
+                server.insert("auth".to_string(), JsonValue::String("oauth".to_string()));
+                if !oauth.is_empty() {
+                    server.insert("oauth".to_string(), JsonValue::Object(oauth));
+                }
+            } else {
+                server.insert("auth".to_string(), JsonValue::String("none".to_string()));
+            }
+        }
+        unsupported => {
+            return Err(format!(
+                "auth.type `{unsupported}` is not supported by this runtime; the server is disabled instead of dropping its authentication requirement"
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn normalize_agent_plugin_stdio_server(

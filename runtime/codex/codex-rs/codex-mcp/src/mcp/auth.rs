@@ -4,6 +4,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use codex_config::McpServerAuth;
 use codex_config::McpServerConfig;
+use codex_config::McpServerOAuthConfig;
 use codex_config::McpServerTransportConfig;
 use codex_config::types::AuthKeyringBackendKind;
 use codex_config::types::OAuthCredentialsStoreMode;
@@ -16,9 +17,10 @@ use codex_rmcp_client::McpOAuthCallbackMode;
 use codex_rmcp_client::OAuthDiscoveryTimeout;
 use codex_rmcp_client::OAuthProviderError;
 use codex_rmcp_client::StreamableHttpRedirectMode;
-use codex_rmcp_client::determine_streamable_http_auth_status;
 use codex_rmcp_client::determine_streamable_http_auth_status_from_credentials;
+use codex_rmcp_client::determine_streamable_http_auth_status_with_config;
 use codex_rmcp_client::discover_streamable_http_oauth;
+use codex_rmcp_client::discover_streamable_http_oauth_with_config;
 use codex_rmcp_client::resolve_mcp_oauth_callback_url;
 use futures::FutureExt;
 use futures::future::join_all;
@@ -123,6 +125,39 @@ pub async fn oauth_login_support(
     }
 }
 
+pub async fn oauth_login_support_with_config(
+    transport: &McpServerTransportConfig,
+    oauth: Option<&McpServerOAuthConfig>,
+    oauth_resource: Option<&str>,
+    http_client: Arc<dyn HttpClient>,
+    discovery_timeout: OAuthDiscoveryTimeout,
+    redirect_mode: StreamableHttpRedirectMode,
+) -> McpOAuthLoginSupport {
+    let Some(mut config) = oauth_login_candidate(transport) else {
+        return McpOAuthLoginSupport::Unsupported;
+    };
+    match discover_streamable_http_oauth_with_config(
+        &config.url,
+        config.http_headers.clone(),
+        config.env_http_headers.clone(),
+        http_client,
+        discovery_timeout,
+        redirect_mode,
+        oauth,
+        oauth_resource,
+    )
+    .await
+    {
+        Ok(Some(discovery)) => {
+            config.discovered_scopes = discovery.scopes_supported;
+            config.callback_mode = discovery.callback_mode;
+            McpOAuthLoginSupport::Supported(config)
+        }
+        Ok(None) => McpOAuthLoginSupport::Unsupported,
+        Err(err) => McpOAuthLoginSupport::Unknown(err),
+    }
+}
+
 fn oauth_login_candidate(transport: &McpServerTransportConfig) -> Option<McpOAuthLoginConfig> {
     let McpServerTransportConfig::StreamableHttp {
         url,
@@ -158,38 +193,63 @@ pub async fn discover_supported_scopes(
     }
 }
 
+pub async fn discover_supported_scopes_with_config(
+    transport: &McpServerTransportConfig,
+    oauth: Option<&McpServerOAuthConfig>,
+    oauth_resource: Option<&str>,
+    http_client: Arc<dyn HttpClient>,
+    discovery_timeout: OAuthDiscoveryTimeout,
+    redirect_mode: StreamableHttpRedirectMode,
+) -> Option<Vec<String>> {
+    let config = oauth_login_candidate(transport)?;
+    discover_streamable_http_oauth_with_config(
+        &config.url,
+        config.http_headers,
+        config.env_http_headers,
+        http_client,
+        discovery_timeout,
+        redirect_mode,
+        oauth,
+        oauth_resource,
+    )
+    .await
+    .ok()
+    .flatten()
+    .and_then(|discovery| discovery.scopes_supported)
+}
+
 pub fn resolve_oauth_scopes(
     explicit_scopes: Option<Vec<String>>,
     configured_scopes: Option<Vec<String>>,
     discovered_scopes: Option<Vec<String>>,
+    base_scopes: Option<Vec<String>>,
+    default_scopes: Option<Vec<String>>,
 ) -> ResolvedMcpOAuthScopes {
-    if let Some(scopes) = explicit_scopes {
-        return ResolvedMcpOAuthScopes {
-            scopes,
-            source: McpOAuthScopesSource::Explicit,
-        };
+    let (mut scopes, source) = if let Some(scopes) = explicit_scopes {
+        (scopes, McpOAuthScopesSource::Explicit)
+    } else if let Some(scopes) = configured_scopes {
+        (scopes, McpOAuthScopesSource::Configured)
+    } else if let Some(scopes) = default_scopes {
+        (scopes, McpOAuthScopesSource::Configured)
+    } else if let Some(scopes) = discovered_scopes.filter(|scopes| !scopes.is_empty()) {
+        (scopes, McpOAuthScopesSource::Discovered)
+    } else {
+        (Vec::new(), McpOAuthScopesSource::Empty)
+    };
+    let has_base_scopes = base_scopes
+        .as_ref()
+        .is_some_and(|scopes| !scopes.is_empty());
+    for scope in base_scopes.unwrap_or_default() {
+        if !scopes.contains(&scope) {
+            scopes.push(scope);
+        }
     }
-
-    if let Some(scopes) = configured_scopes {
-        return ResolvedMcpOAuthScopes {
-            scopes,
-            source: McpOAuthScopesSource::Configured,
-        };
-    }
-
-    if let Some(scopes) = discovered_scopes
-        && !scopes.is_empty()
-    {
-        return ResolvedMcpOAuthScopes {
-            scopes,
-            source: McpOAuthScopesSource::Discovered,
-        };
-    }
-
-    ResolvedMcpOAuthScopes {
-        scopes: Vec::new(),
-        source: McpOAuthScopesSource::Empty,
-    }
+    let source = if has_base_scopes && source == McpOAuthScopesSource::Discovered {
+        McpOAuthScopesSource::Configured
+    } else {
+        source
+    };
+    ResolvedMcpOAuthScopes { scopes, source }
 }
 
 pub fn should_retry_without_scopes(scopes: &ResolvedMcpOAuthScopes, error: &anyhow::Error) -> bool {
@@ -326,6 +386,9 @@ async fn compute_auth_status(
             },
         );
     }
+    if matches!(config.auth, McpServerAuth::None) {
+        return Ok(McpAuthState::Unsupported);
+    }
 
     let has_runtime_auth = matches!(config.auth, McpServerAuth::ChatGpt)
         && auth.is_some_and(CodexAuth::uses_codex_backend)
@@ -359,6 +422,11 @@ async fn compute_auth_status(
             http_headers_helper,
         } => {
             if http_headers_helper.is_some() {
+                if config.oauth.as_ref().is_some_and(|oauth| {
+                    oauth.authorization_url.is_some() && oauth.token_url.is_some()
+                }) {
+                    return Ok(McpAuthState::LoggedOut(McpLoginRequirement::Login));
+                }
                 // Status inspection must not execute an arbitrary local helper. Existing
                 // credentials remain reportable; otherwise discovery waits for startup/login.
                 return Ok(determine_streamable_http_auth_status_from_credentials(
@@ -381,7 +449,7 @@ async fn compute_auth_status(
                 OAuthDiscoveryTimeout::Requested
             };
             let oauth_credential_name = config.oauth_credential_name(server_name);
-            determine_streamable_http_auth_status(
+            determine_streamable_http_auth_status_with_config(
                 oauth_credential_name.as_ref(),
                 url,
                 bearer_token_env_var.as_deref(),
@@ -392,6 +460,8 @@ async fn compute_auth_status(
                 http_client,
                 discovery_timeout,
                 redirect_mode,
+                config.oauth.as_ref(),
+                config.oauth_resource.as_deref(),
             )
             .boxed()
             .await
@@ -462,6 +532,8 @@ mod tests {
             Some(vec!["explicit".to_string()]),
             Some(vec!["configured".to_string()]),
             Some(vec!["discovered".to_string()]),
+            None,
+            None,
         );
 
         assert_eq!(
@@ -479,6 +551,8 @@ mod tests {
             /*explicit_scopes*/ None,
             Some(vec!["configured".to_string()]),
             Some(vec!["discovered".to_string()]),
+            None,
+            None,
         );
 
         assert_eq!(
@@ -496,6 +570,8 @@ mod tests {
             /*explicit_scopes*/ None,
             /*configured_scopes*/ None,
             Some(vec!["discovered".to_string()]),
+            None,
+            None,
         );
 
         assert_eq!(
@@ -513,6 +589,8 @@ mod tests {
             /*explicit_scopes*/ None,
             Some(Vec::new()),
             Some(vec!["ignored".into()]),
+            None,
+            None,
         );
 
         assert_eq!(
@@ -528,7 +606,7 @@ mod tests {
     fn resolve_oauth_scopes_falls_back_to_empty() {
         let resolved = resolve_oauth_scopes(
             /*explicit_scopes*/ None, /*configured_scopes*/ None,
-            /*discovered_scopes*/ None,
+            /*discovered_scopes*/ None, None, None,
         );
 
         assert_eq!(
@@ -536,6 +614,25 @@ mod tests {
             ResolvedMcpOAuthScopes {
                 scopes: Vec::new(),
                 source: McpOAuthScopesSource::Empty,
+            }
+        );
+    }
+
+    #[test]
+    fn resolve_oauth_scopes_appends_base_and_prefers_configured_defaults() {
+        let resolved = resolve_oauth_scopes(
+            None,
+            None,
+            Some(vec!["discovered".into()]),
+            Some(vec!["base".into(), "discovered".into()]),
+            Some(vec!["default".into()]),
+        );
+
+        assert_eq!(
+            resolved,
+            ResolvedMcpOAuthScopes {
+                scopes: vec!["default".into(), "base".into(), "discovered".into()],
+                source: McpOAuthScopesSource::Configured,
             }
         );
     }

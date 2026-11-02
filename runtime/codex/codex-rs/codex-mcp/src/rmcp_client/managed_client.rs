@@ -17,6 +17,7 @@ use codex_connectors::ConnectorRuntimeContext;
 use codex_protocol::mcp::McpServerInfo;
 use codex_rmcp_client::RmcpClient;
 use codex_rmcp_client::SendElicitation;
+use rmcp::model::GetPromptResult;
 use rmcp::model::ListResourceTemplatesResult;
 use rmcp::model::ListResourcesResult;
 use rmcp::model::PaginatedRequestParams;
@@ -69,6 +70,67 @@ impl ManagedClient {
             }
         })
         .await?
+    }
+
+    pub(crate) async fn send_custom_request(
+        &self,
+        method: &str,
+        mut params: Option<Value>,
+        timeout: Option<Duration>,
+    ) -> Result<rmcp::model::ServerResult> {
+        if let Some(lease) = self.connection_sharing.server_lease() {
+            let params = params.get_or_insert_with(|| serde_json::json!({}));
+            let params = params
+                .as_object_mut()
+                .ok_or_else(|| anyhow!("MCP request params must be an object"))?;
+            params
+                .entry("_meta")
+                .or_insert_with(|| serde_json::json!({}))
+                .as_object_mut()
+                .ok_or_else(|| anyhow!("MCP request _meta must be an object"))?
+                .insert(
+                    crate::connection_pool::LEASE_META_KEY.to_owned(),
+                    serde_json::json!(lease.id),
+                );
+        }
+        self.with_lease_request(
+            self.client
+                .send_custom_request_with_timeout(method, params, timeout),
+        )
+        .await
+    }
+
+    pub(crate) async fn get_prompt(
+        &self,
+        mut params: rmcp::model::GetPromptRequestParams,
+        timeout: Option<Duration>,
+    ) -> Result<GetPromptResult> {
+        if let Some(lease) = self.connection_sharing.server_lease() {
+            params
+                .meta
+                .get_or_insert_with(rmcp::model::RequestMetaObject::new)
+                .0
+                .0
+                .insert(
+                    crate::connection_pool::LEASE_META_KEY.to_owned(),
+                    serde_json::json!(lease.id),
+                );
+        }
+        self.with_lease_request(async {
+            match &self.shared_elicitation {
+                Some(send_elicitation) => {
+                    self.client
+                        .get_prompt_with_elicitation(
+                            params.clone(),
+                            timeout,
+                            Arc::clone(send_elicitation),
+                        )
+                        .await
+                }
+                None => self.client.get_prompt(params.clone(), timeout).await,
+            }
+        })
+        .await
     }
 
     pub(crate) async fn call_tool(

@@ -175,11 +175,20 @@ impl OAuthPersistor {
         // The provider uses a separate HTTP client and cannot re-enter `AuthClient`. Retain this
         // async guard so requests cannot observe credentials while they are staged and committed.
         let mut guard = manager.lock().await;
-        let metadata = guard
-            .resolve_metadata()
-            .await
-            .context("failed to resolve OAuth metadata before using stored refresh credentials")?
-            .metadata;
+        let metadata_overrides =
+            crate::oauth_metadata_config::from_config(self.inner.oauth_config.as_ref(), None)?;
+        let discovered_metadata = match guard.resolve_metadata().await {
+            Ok(resolved) => Some(resolved.metadata),
+            Err(error) => {
+                if metadata_overrides.apply_to_metadata(None).is_err() {
+                    return Err(error).context(
+                        "failed to resolve OAuth metadata before using stored refresh credentials",
+                    );
+                }
+                None
+            }
+        };
+        let metadata = metadata_overrides.apply_to_metadata(discovered_metadata)?;
         validate_refresh_token_issuer(&metadata, &latest)?;
         guard.set_metadata(metadata);
         install_tokens_in_manager(&mut guard, &latest, self.inner.oauth_config.as_ref())

@@ -32,7 +32,7 @@ use codex_core_plugins::remote::validate_remote_plugin_id;
 use codex_core_plugins::remote_bundle::RemotePluginBundleInstallError;
 use codex_mcp::McpOAuthLoginSupport;
 use codex_mcp::McpRuntimeContext;
-use codex_mcp::oauth_login_support;
+use codex_mcp::oauth_login_support_with_config;
 use codex_mcp::resolve_oauth_callback;
 use codex_mcp::should_retry_without_scopes;
 use codex_plugin::PluginId;
@@ -445,6 +445,48 @@ impl PluginRequestProcessor {
         self.plugin_read_response(params)
             .await
             .map(|response| Some(response.into()))
+    }
+
+    pub(crate) async fn plugin_mcp_credential_write(
+        &self,
+        params: codex_app_server_protocol::PluginMcpCredentialWriteParams,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        use codex_app_server_protocol::PluginMcpCredential;
+        use codex_mcp::plugin_api_key::PluginApiKeyCredential;
+        // Ensure the next runtime publication cannot reuse a client that holds
+        // the old credential while it is being rotated or deleted.
+        self.thread_manager.reconnect_mcp_runtimes().await;
+        let credential = params.credential.map(|credential| match credential {
+            PluginMcpCredential::OAuthPrivateKeyJwt {
+                private_key,
+                algorithm,
+                key_id,
+            } => PluginApiKeyCredential::OAuthPrivateKeyJwt {
+                private_key,
+                algorithm,
+                key_id,
+            },
+            PluginMcpCredential::Token { token } => PluginApiKeyCredential::Token { token },
+            PluginMcpCredential::Basic { username, password } => {
+                PluginApiKeyCredential::Basic { username, password }
+            }
+            PluginMcpCredential::OAuthClientSecret { secret } => {
+                PluginApiKeyCredential::OAuthClientSecret { secret }
+            }
+        });
+        self.thread_manager
+            .plugins_manager()
+            .configure_plugin_mcp_api_key(&params.plugin_id, params.server_name, credential)
+            .await
+            .map_err(invalid_request)?;
+        reload_user_config(&self.config_manager, &self.thread_manager).await;
+        // A thread refresh alone can reuse already-authenticated clients. Force a
+        // fresh handshake so a removed or rotated secret cannot authorize future calls.
+        self.thread_manager.plugins_manager().clear_cache();
+        self.thread_manager.reconnect_mcp_runtimes().await;
+        Ok(Some(
+            codex_app_server_protocol::PluginMcpCredentialWriteResponse {}.into(),
+        ))
     }
 
     pub(crate) async fn plugin_skill_read(
@@ -1175,6 +1217,28 @@ impl PluginRequestProcessor {
                     apps: app_summaries,
                     app_templates: Vec::new(),
                     mcp_servers: outcome.plugin.mcp_server_names,
+                    mcp_server_errors: outcome
+                        .plugin
+                        .mcp_server_errors
+                        .into_iter()
+                        .map(
+                            |error| codex_app_server_protocol::PluginMcpServerErrorInfo {
+                                server_name: error.name,
+                                message: error.message,
+                                auth_descriptor: error.auth_descriptor,
+                            },
+                        )
+                        .collect(),
+                    mcp_server_auth: outcome
+                        .plugin
+                        .mcp_server_auth
+                        .into_iter()
+                        .map(|auth| codex_app_server_protocol::PluginMcpServerAuthInfo {
+                            server_name: auth.name,
+                            auth_descriptor: auth.auth_descriptor,
+                            credential_configured: auth.credential_configured,
+                        })
+                        .collect(),
                     scheduled_tasks: None,
                 }
             }
@@ -1875,7 +1939,12 @@ impl PluginRequestProcessor {
         );
         for (name, server) in plugin_mcp_servers {
             // EMA uses the account's enterprise grant, never per-plugin OAuth fallback.
-            if !server.enabled || matches!(server.auth, codex_config::types::McpServerAuth::EmaAuth)
+            if !server.enabled
+                || matches!(
+                    server.auth,
+                    codex_config::types::McpServerAuth::None
+                        | codex_config::types::McpServerAuth::EmaAuth
+                )
             {
                 continue;
             }
@@ -1895,8 +1964,10 @@ impl PluginRequestProcessor {
                     continue;
                 }
             };
-            let login_support = oauth_login_support(
+            let login_support = oauth_login_support_with_config(
                 &server.transport,
+                server.oauth.as_ref(),
+                server.oauth_resource.as_deref(),
                 Arc::clone(&http_client),
                 OAuthDiscoveryTimeout::LOCAL,
                 redirect_mode,
@@ -1917,6 +1988,14 @@ impl PluginRequestProcessor {
                 /*explicit_scopes*/ None,
                 server.scopes.clone(),
                 oauth_config.discovered_scopes.clone(),
+                server
+                    .oauth
+                    .as_ref()
+                    .and_then(|oauth| oauth.base_scopes.clone()),
+                server
+                    .oauth
+                    .as_ref()
+                    .and_then(|oauth| oauth.default_scopes.clone()),
             );
 
             let store_mode = config.mcp_oauth_credentials_store_mode;
@@ -1941,6 +2020,22 @@ impl PluginRequestProcessor {
             let thread_manager = Arc::clone(&self.thread_manager);
             let http_client = Arc::clone(&http_client);
             let global_callback_url = config.mcp_oauth_callback_url.clone();
+            let client_registration = match server
+                .oauth
+                .as_ref()
+                .and_then(|oauth| oauth.client_registration)
+                .unwrap_or_default()
+            {
+                codex_config::McpOAuthClientRegistrationMode::Auto => {
+                    McpOAuthClientRegistration::Auto
+                }
+                codex_config::McpOAuthClientRegistrationMode::Cimd => {
+                    McpOAuthClientRegistration::Cimd
+                }
+                codex_config::McpOAuthClientRegistrationMode::Dcr => {
+                    McpOAuthClientRegistration::Dcr
+                }
+            };
 
             tokio::spawn(async move {
                 let oauth_client_config = server.oauth.as_ref();
@@ -1953,7 +2048,7 @@ impl PluginRequestProcessor {
                     oauth_config.env_http_headers.clone(),
                     &resolved_scopes.scopes,
                     oauth_client_config,
-                    McpOAuthClientRegistration::Auto,
+                    client_registration,
                     server.oauth_resource.as_deref(),
                     callback_port,
                     callback_url.as_deref(),
@@ -1974,7 +2069,7 @@ impl PluginRequestProcessor {
                             oauth_config.env_http_headers,
                             &[],
                             oauth_client_config,
-                            McpOAuthClientRegistration::Auto,
+                            client_registration,
                             server.oauth_resource.as_deref(),
                             callback_port,
                             callback_url.as_deref(),
@@ -2361,6 +2456,8 @@ fn remote_plugin_detail_to_info(
         apps,
         app_templates,
         mcp_servers: detail.mcp_servers,
+        mcp_server_errors: Vec::new(),
+        mcp_server_auth: Vec::new(),
         scheduled_tasks: detail.scheduled_tasks,
     }
 }

@@ -1106,6 +1106,7 @@ async fn oauth_startup_child() -> anyhow::Result<()> {
             CHILD_RESOURCE_API_KEY_ENV.to_string(),
         )])),
         oauth_config,
+        /*oauth_resource*/ None,
         OAuthCredentialsStoreMode::File,
         AuthKeyringBackendKind::default(),
         http_client,

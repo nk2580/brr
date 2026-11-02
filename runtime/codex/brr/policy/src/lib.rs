@@ -30,6 +30,11 @@ pub fn enforce_startup_overrides(overrides: &mut Vec<String>) {
         "cli_auth_credentials_store=\"file\"".to_string(),
         "approval_policy=\"on-request\"".to_string(),
         "sandbox_mode=\"workspace-write\"".to_string(),
+        "features.plugins=true".to_string(),
+        "features.mcp_2026_07_28=true".to_string(),
+        "features.codex_apps_mcp_2026_07_28=true".to_string(),
+        "features.mcp_tool_list_changed=true".to_string(),
+        "features.mcp_connection_sharing=true".to_string(),
     ]);
 }
 
@@ -67,6 +72,11 @@ mod tests {
                 "cli_auth_credentials_store=\"file\"",
                 "approval_policy=\"on-request\"",
                 "sandbox_mode=\"workspace-write\"",
+                "features.plugins=true",
+                "features.mcp_2026_07_28=true",
+                "features.codex_apps_mcp_2026_07_28=true",
+                "features.mcp_tool_list_changed=true",
+                "features.mcp_connection_sharing=true",
             ]
         );
     }
@@ -77,6 +87,16 @@ mod tests {
         assert_eq!(validate_login_mode("chatgptDeviceCode"), Ok(()));
         for mode in ["apiKey", "chatgptAuthTokens", "bedrock", ""] {
             assert_eq!(validate_login_mode(mode), Err(LOGIN_REQUIRED_ERROR));
+        }
+    }
+
+    #[test]
+    fn enables_plugins_and_modern_mcp_without_allowing_caller_opt_out() {
+        let mut overrides = vec!["features.plugins=false".to_string(), "features.mcp_2026_07_28=false".to_string()];
+        enforce_startup_overrides(&mut overrides);
+        for key in ["plugins", "mcp_2026_07_28", "codex_apps_mcp_2026_07_28", "mcp_tool_list_changed", "mcp_connection_sharing"] {
+            let prefix = format!("features.{key}=");
+            assert_eq!(overrides.iter().rev().find(|value| value.starts_with(&prefix)), Some(&format!("features.{key}=true")));
         }
     }
 

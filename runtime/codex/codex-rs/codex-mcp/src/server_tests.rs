@@ -84,6 +84,28 @@ fn connection_identity(
     )
 }
 
+#[test]
+fn no_auth_mcp_server_does_not_capture_saved_oauth_credentials() {
+    let runtime_context = runtime_context();
+    let server = EffectiveMcpServer::from_host_config(
+        serde_json::from_value(serde_json::json!({
+            "url": "https://public.example/mcp",
+            "environment_id": DEFAULT_MCP_SERVER_ENVIRONMENT_ID,
+            "auth": "none",
+        }))
+        .expect("no-auth MCP configuration should deserialize"),
+    );
+
+    let identity = connection_identity(&server, &runtime_context);
+    assert!(identity.oauth_store.is_none());
+    assert!(
+        identity
+            .oauth_credentials
+            .as_ref()
+            .is_ok_and(Option::is_none)
+    );
+}
+
 fn explicit_authorization_server() -> EffectiveMcpServer {
     EffectiveMcpServer::from_host_config(
         serde_json::from_value(serde_json::json!({

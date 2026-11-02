@@ -5,6 +5,19 @@ use pretty_assertions::assert_eq;
 use serde_json::json;
 
 #[test]
+fn deserializes_mcp_prompts_and_completion_requests_with_thread_and_paging_fields() -> Result<()> {
+    for value in [
+        json!({"id":1,"method":"mcpServer/prompts/list","params":{"server":"docs","threadId":"thread-1","cursor":"next"}}),
+        json!({"id":2,"method":"mcpServer/prompt/get","params":{"server":"docs","threadId":"thread-1","name":"search","arguments":{"query":"rust"}}}),
+        json!({"id":3,"method":"mcpServer/completion/complete","params":{"server":"docs","threadId":"thread-1","ref":{"type":"ref/prompt","name":"search"},"argument":{"name":"query","value":"ru"},"context":{"arguments":{"query":"ru"}}}}),
+    ] {
+        let request: ClientRequest = serde_json::from_value(value.clone())?;
+        assert_eq!(serde_json::to_value(request)?, value);
+    }
+    Ok(())
+}
+
+#[test]
 fn client_response_payload_serializes_without_an_intermediate_json_value() -> Result<()> {
     let payload = ClientResponsePayload::ThreadArchive(v2::ThreadArchiveResponse {});
     assert_eq!(serde_json::to_string(&payload)?, "{}");

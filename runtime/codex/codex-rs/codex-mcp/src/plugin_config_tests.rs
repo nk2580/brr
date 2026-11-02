@@ -5,6 +5,7 @@ use super::parse_agent_plugin_mcp_config;
 use super::parse_executor_plugin_mcp_config;
 use super::parse_plugin_mcp_config;
 use codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID;
+use codex_config::McpOAuthClientRegistrationMode;
 use codex_config::McpServerConfig;
 use codex_config::McpServerEnvVar;
 use codex_config::McpServerOAuthConfig;
@@ -125,6 +126,216 @@ fn agent_plugin_mcp_expands_reserved_paths_and_maps_transports() {
             .and_then(|headers| headers.get("X-Plugin")),
         Some(&"demo".to_string())
     );
+}
+
+#[test]
+fn agent_plugin_mcp_maps_supported_openai_auth_and_reports_unsupported_flows() {
+    let plugin_root = plugin_root();
+    let plugin_data_root = plugin_root.parent().expect("parent").join("plugin-data");
+    let outcome = parse_agent_plugin_mcp_config(
+        &plugin_root,
+        &plugin_data_root,
+        r#"{
+          "$schema":"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+          "mcpServers": {
+            "stdio": {
+              "type":"stdio",
+              "command":"node",
+              "extensions":{"com.openai":{"auth":{"type":"none"}}}
+            },
+            "public": {
+              "type":"streamable-http",
+              "url":"https://public.example/mcp",
+              "extensions":{"com.example":{"vendorSetting":true},"com.openai":{"auth":{"type":"none"}}}
+            },
+            "oauth": {
+              "type":"streamable-http",
+              "url":"https://oauth.example/mcp",
+              "extensions":{"com.openai":{"auth":{"type":"oauth","client":{"mode":"provided","clientId":"plugin-client","tokenEndpointAuthMethod":"none"},"baseScopes":["read:docs"]}}}
+            },
+            "dcr": {
+              "type":"streamable-http",
+              "url":"https://dcr.example/mcp",
+              "extensions":{"com.openai":{"auth":{"type":"oauth","client":{"mode":"dcr"},"resource":"https://dcr.example/resource"}}}
+            },
+            "cimd-preference": {
+              "type":"streamable-http",
+              "url":"https://cimd.example/mcp",
+              "extensions":{"com.openai":{"auth":{"type":"oauth","client":{"mode":"cimd"}}}}
+            },
+            "mixed": {
+              "type":"streamable-http",
+              "url":"https://mixed.example/mcp",
+              "extensions":{"com.openai":{"auth":{"type":"mixed","baseScopes":["always"],"defaultScopes":["default"]}}}
+            },
+            "api-key": {
+              "type":"streamable-http",
+              "url":"https://key.example/mcp",
+              "extensions":{"com.openai":{"auth":{"type":"api_key","headerScheme":"bearer"}}}
+            }
+          }
+        }"#,
+    )
+    .expect("parse Agent Plugins MCP config");
+
+    assert_eq!(
+        outcome.servers["public"].auth,
+        codex_config::McpServerAuth::None
+    );
+    assert!(matches!(
+        outcome.servers["stdio"].transport,
+        McpServerTransportConfig::Stdio { .. }
+    ));
+    let oauth = &outcome.servers["oauth"];
+    assert_eq!(oauth.auth, codex_config::McpServerAuth::OAuth);
+    assert_eq!(oauth.oauth_client_id(), Some("plugin-client"));
+    assert_eq!(
+        oauth.oauth.as_ref().unwrap().base_scopes,
+        Some(vec!["read:docs".to_string()])
+    );
+    assert_eq!(
+        outcome.servers["dcr"]
+            .oauth
+            .as_ref()
+            .unwrap()
+            .client_registration,
+        Some(McpOAuthClientRegistrationMode::Dcr)
+    );
+    assert_eq!(
+        outcome.servers["dcr"].oauth_resource.as_deref(),
+        Some("https://dcr.example/resource")
+    );
+    assert_eq!(
+        outcome.servers["cimd-preference"]
+            .oauth
+            .as_ref()
+            .unwrap()
+            .client_registration,
+        Some(McpOAuthClientRegistrationMode::Auto)
+    );
+    let mixed = &outcome.servers["mixed"];
+    assert_eq!(mixed.auth, codex_config::McpServerAuth::OAuth);
+    assert_eq!(
+        mixed.oauth.as_ref().unwrap().base_scopes,
+        Some(vec!["always".to_string()])
+    );
+    assert_eq!(
+        mixed.oauth.as_ref().unwrap().default_scopes,
+        Some(vec!["default".to_string()])
+    );
+    assert_eq!(outcome.errors.len(), 1);
+    assert_eq!(outcome.errors[0].name, "api-key");
+    assert!(outcome.errors[0].message.contains("api_key"));
+    assert!(outcome.errors[0].message.contains("not supported"));
+    let auth_descriptor = outcome.errors[0]
+        .auth_descriptor
+        .as_ref()
+        .expect("sanitized unsupported auth descriptor");
+    assert_eq!(auth_descriptor["type"], "api_key");
+    assert_eq!(auth_descriptor["headerScheme"], "bearer");
+    let auth_info = outcome
+        .auth
+        .iter()
+        .find(|auth| auth.name == "api-key")
+        .expect("auth detail is retained even when setup is incomplete");
+    assert!(!auth_info.credential_configured);
+    assert_eq!(
+        auth_info.auth_descriptor.as_ref().unwrap()["serverUrl"],
+        "https://key.example/mcp"
+    );
+}
+
+#[test]
+fn mixed_auth_keeps_public_server_available_before_confidential_client_setup() {
+    let plugin_root = plugin_root();
+    let outcome = parse_agent_plugin_mcp_config(
+        &plugin_root,
+        &plugin_root.join("plugin-data"),
+        r#"{
+          "$schema":"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+          "mcpServers": {
+            "mixed": {
+              "type":"streamable-http",
+              "url":"https://mixed.example/mcp",
+              "extensions":{"com.openai":{"auth":{"type":"mixed","client":{"mode":"provided","clientId":"client","tokenEndpointAuthMethod":"client_secret_basic"}}}}
+            }
+          }
+        }"#,
+    )
+    .expect("parse mixed auth declaration");
+
+    assert!(outcome.errors.is_empty());
+    assert_eq!(
+        outcome.servers["mixed"].auth,
+        codex_config::McpServerAuth::None
+    );
+    assert!(outcome.servers["mixed"].oauth.is_none());
+    let auth = outcome
+        .auth
+        .iter()
+        .find(|auth| auth.name == "mixed")
+        .unwrap();
+    assert!(!auth.credential_configured);
+}
+
+#[test]
+fn agent_plugin_mcp_auth_diagnostics_never_echo_unrecognized_secret_fields() {
+    let plugin_root = plugin_root();
+    let plugin_data_root = plugin_root.parent().expect("parent").join("plugin-data");
+    let outcome = parse_agent_plugin_mcp_config(
+        &plugin_root,
+        &plugin_data_root,
+        r#"{
+          "$schema":"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+          "mcpServers": {
+            "api": {
+              "type":"streamable-http",
+              "url":"https://api.example/mcp",
+              "extensions":{"com.openai":{"auth":{"type":"api_key","headerScheme":"bearer","token":"do-not-echo"}}}
+            }
+          }
+        }"#,
+    )
+    .expect("parse Agent Plugins MCP config");
+
+    assert_eq!(outcome.errors.len(), 1);
+    let error = &outcome.errors[0];
+    assert!(error.message.contains("token"));
+    assert!(!error.message.contains("do-not-echo"));
+    assert!(error.auth_descriptor.is_none());
+}
+
+#[test]
+fn agent_plugin_mcp_auth_diagnostics_strip_credentials_and_query_values_from_urls() {
+    let plugin_root = plugin_root();
+    let plugin_data_root = plugin_root.parent().expect("parent").join("plugin-data");
+    let outcome = parse_agent_plugin_mcp_config(
+        &plugin_root,
+        &plugin_data_root,
+        r#"{
+          "$schema":"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+          "mcpServers": {
+            "oauth": {
+              "type":"streamable-http",
+              "url":"https://oauth.example/mcp",
+              "extensions":{"com.openai":{"auth":{"type":"oauth","authorizationUrl":"https://user:password@example.com/authorize?access_token=secret-value#fragment"}}}
+            }
+          }
+        }"#,
+    )
+    .expect("parse Agent Plugins MCP config");
+
+    let descriptor = outcome.errors[0]
+        .auth_descriptor
+        .as_ref()
+        .expect("sanitized unsupported auth descriptor");
+    let rendered = descriptor.to_string();
+    assert!(rendered.contains("https://example.com/authorize"));
+    assert!(!rendered.contains("user"));
+    assert!(!rendered.contains("password"));
+    assert!(!rendered.contains("access_token"));
+    assert!(!rendered.contains("secret-value"));
+    assert!(!rendered.contains("fragment"));
 }
 
 #[test]
@@ -635,6 +846,7 @@ fn declared_placement_preserves_local_plugin_normalization() {
                 ("hosted".to_string(), expected_http),
             ]),
             errors: Vec::new(),
+            auth: Vec::new(),
         }
     );
 }
@@ -660,7 +872,9 @@ fn native_plugin_mcp_cannot_self_declare_ema_auth() {
                 errors: vec![PluginMcpServerParseError {
                     name: "enterprise".to_string(),
                     message: "plugin MCP declarations cannot select ema_auth; configure enterprise authentication in host policy".to_string(),
+                    auth_descriptor: None,
                 }],
+                auth: Vec::new(),
             }
         );
     }
@@ -707,6 +921,7 @@ fn environment_placement_forces_authority_and_defaults_null_cwd() {
                 ),
             )]),
             errors: Vec::new(),
+            auth: Vec::new(),
         }
     );
 }
@@ -738,6 +953,7 @@ fn environment_placement_resolves_relative_cwd_beneath_plugin_root() {
                 ),
             )]),
             errors: Vec::new(),
+            auth: Vec::new(),
         }
     );
 }
@@ -779,6 +995,7 @@ fn executor_environment_placement_resolves_foreign_uri_cwd() {
                 ),
             )]),
             errors: Vec::new(),
+            auth: Vec::new(),
         }
     );
 }
@@ -803,7 +1020,9 @@ fn environment_placement_rejects_relative_cwd_that_escapes_package() {
                 message: format!(
                     "cwd `../outside` must remain within plugin root `{plugin_root_uri}`"
                 ),
+                auth_descriptor: None,
             }],
+            auth: Vec::new(),
         }
     );
 }
@@ -827,7 +1046,9 @@ fn environment_placement_rejects_orchestrator_env_vars() {
                 message:
                     "env_vars entry `TOKEN` cannot use source `local` in an executor-owned plugin"
                         .to_string(),
+                auth_descriptor: None,
             }],
+            auth: Vec::new(),
         }
     );
 }
@@ -867,7 +1088,9 @@ fn remote_environment_placement_preserves_bearer_and_rejects_header_env_referenc
                 name: "headers".to_string(),
                 message: "`env_http_headers` requires executor-side environment resolution for an executor-owned HTTP MCP"
                     .to_string(),
+                auth_descriptor: None,
             }],
+            auth: Vec::new(),
         }
     );
 }
@@ -925,6 +1148,7 @@ fn local_environment_placement_preserves_http_env_references() {
                 },
             )]),
             errors: Vec::new(),
+            auth: Vec::new(),
         }
     );
 }
@@ -959,6 +1183,7 @@ fn local_environment_placement_preserves_local_env_vars() {
                 ),
             )]),
             errors: Vec::new(),
+            auth: Vec::new(),
         }
     );
 }
@@ -981,7 +1206,9 @@ fn local_environment_placement_rejects_remote_env_vars() {
                 name: "demo".to_string(),
                 message: "env_vars entry `TOKEN` cannot use source `remote` in a local environment"
                     .to_string(),
+                auth_descriptor: None,
             }],
+            auth: Vec::new(),
         }
     );
 }

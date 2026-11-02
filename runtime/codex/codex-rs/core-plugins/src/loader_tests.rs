@@ -154,7 +154,7 @@ async fn concurrent_plugin_loads_preserve_mcp_precedence_and_hook_warnings() {
 }
 
 #[tokio::test]
-async fn agent_plugin_overlay_apps_are_not_runtime_active() {
+async fn agent_plugin_overlay_apps_use_the_selected_manifest() {
     let temp_dir = TempDir::new().expect("tempdir");
     let plugin_root = temp_dir.path().join("plugin");
     write_file(
@@ -170,10 +170,81 @@ async fn agent_plugin_overlay_apps_are_not_runtime_active() {
         r#"{"apps":{"example":{"id":"connector_example"}}}"#,
     );
 
-    assert!(
-        load_plugin_apps(&plugin_root, &PluginId::parse("plugin@test").unwrap())
-            .await
-            .is_empty()
+    let apps = load_plugin_apps(&plugin_root, &PluginId::parse("plugin@test").unwrap()).await;
+    assert_eq!(apps.len(), 1);
+    assert_eq!(apps[0].name, "example");
+}
+
+#[tokio::test]
+async fn portable_root_openai_extension_apps_are_runtime_active() {
+    let temp_dir = TempDir::new().expect("tempdir");
+    let plugin_root = temp_dir.path().join("plugin");
+    write_file(
+        &plugin_root.join("plugin.json"),
+        &format!(
+            r#"{{"$schema":"{AGENT_PLUGIN_SCHEMA_URI}","name":"plugin","extensions":{{"com.openai":{{"apps":"./.app.json"}}}}}}"#
+        ),
+    );
+    write_file(
+        &plugin_root.join(".app.json"),
+        r#"{"apps":{"example":{"id":"connector_example"}}}"#,
+    );
+
+    let apps = load_plugin_apps(&plugin_root, &PluginId::parse("plugin@test").unwrap()).await;
+    assert_eq!(apps.len(), 1);
+    assert_eq!(apps[0].name, "example");
+}
+
+#[tokio::test]
+async fn portable_plugin_load_uses_the_selected_openai_hook_manifest() {
+    let temp_dir = TempDir::new().expect("tempdir");
+    let plugin_root = temp_dir.path().join("plugins/cache/test/portable/local");
+    write_file(
+        &plugin_root.join("plugin.json"),
+        &format!(
+            r#"{{"$schema":"{AGENT_PLUGIN_SCHEMA_URI}","name":"portable","extensions":{{"com.openai":{{"hooks":"./hooks/selected.json"}}}}}}"#
+        ),
+    );
+    write_file(
+        &plugin_root.join("hooks/selected.json"),
+        r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"echo portable hook"}]}]}}"#,
+    );
+    let config_stack = ConfigLayerStack::new(
+        vec![user_layer(
+            user_config_path(&temp_dir, "config.toml"),
+            "[plugins.\"portable@test\"]\nenabled = true\n",
+        )],
+        ConfigRequirements::default(),
+        ConfigRequirementsToml::default(),
+    )
+    .expect("valid config layer stack");
+    let config: ConfigToml = config_stack
+        .effective_config()
+        .try_into()
+        .expect("plugin config");
+    let skill_config_rules = skill_config_rules_from_stack(&config_stack);
+    let remote_plugin_id_resolver = RemotePluginIdResolver::default();
+    let skill_root_loader = test_skill_root_loader();
+    let scope = PluginLoadScope::AllCapabilities {
+        restriction_product: Some(Product::Codex),
+        skill_config_rules: &skill_config_rules,
+        plugin_skill_snapshots: None,
+        remote_plugin_id_resolver: &remote_plugin_id_resolver,
+        skill_root_loader: skill_root_loader.as_ref(),
+    };
+    let loaded = load_plugin(
+        "portable@test".to_string(),
+        &config.plugins.plugins["portable@test"],
+        &PluginStore::new(temp_dir.path().to_path_buf()),
+        &scope,
+    )
+    .await;
+
+    assert_eq!(loaded.error, None, "{loaded:?}");
+    assert_eq!(loaded.hook_sources.len(), 1, "{loaded:?}");
+    assert_eq!(
+        loaded.hook_sources[0].source_relative_path,
+        "hooks/selected.json"
     );
 }
 

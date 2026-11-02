@@ -976,6 +976,11 @@ client_request_definitions! {
         serialization: None,
         response: v2::PluginReadResponse,
     },
+    PluginMcpCredentialWrite => "plugin/mcpCredential/write" {
+        params: v2::PluginMcpCredentialWriteParams,
+        serialization: global("config"),
+        response: v2::PluginMcpCredentialWriteResponse,
+    },
     PluginSkillRead => "plugin/skill/read" {
         params: v2::PluginSkillReadParams,
         serialization: global("config"),
@@ -1294,6 +1299,24 @@ client_request_definitions! {
         params: v2::McpResourceReadParams,
         serialization: optional_thread_id(params.thread_id),
         response: v2::McpResourceReadResponse,
+    },
+
+    McpServerPromptsList => "mcpServer/prompts/list" {
+        params: v2::McpServerPromptsListParams,
+        serialization: optional_thread_id(params.thread_id),
+        response: v2::McpServerPromptsListResponse,
+    },
+
+    McpServerPromptGet => "mcpServer/prompt/get" {
+        params: v2::McpServerPromptGetParams,
+        serialization: optional_thread_id(params.thread_id),
+        response: v2::McpServerPromptGetResponse,
+    },
+
+    McpServerCompletionComplete => "mcpServer/completion/complete" {
+        params: v2::McpServerCompletionCompleteParams,
+        serialization: optional_thread_id(params.thread_id),
+        response: v2::McpServerCompletionCompleteResponse,
     },
 
     #[experimental("mcpServer/event/stream/start")]

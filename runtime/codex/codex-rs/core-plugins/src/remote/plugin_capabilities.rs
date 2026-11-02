@@ -7,7 +7,6 @@ use crate::loader::load_plugin_apps_from_manifest;
 use crate::loader::load_plugin_hooks;
 use crate::loader::load_plugin_mcp_servers_from_manifest_with_format;
 use crate::loader::plugin_skill_roots;
-use crate::manifest::PluginManifestFormat;
 use crate::store::PluginStore;
 use codex_hooks::plugin_hook_declarations;
 use codex_plugin::PluginId;
@@ -46,16 +45,13 @@ impl RemotePluginCapabilities {
         )
         .await
         .is_empty();
-        // Agent Plugins can declare Apps through an OpenAI extension even when the local
-        // runtime does not activate them. Refresh hints describe declarations, not activation.
+        // Capability refresh follows whichever manifest is selected for local declarations.
         self.has_apps |= !load_plugin_apps_from_manifest(root.as_path(), paths)
             .await
             .is_empty();
-        if loaded.format == PluginManifestFormat::Legacy {
-            let (sources, _) =
-                load_plugin_hooks(&root, plugin_id, &store.plugin_data_root(plugin_id), paths);
-            self.has_hooks |= !plugin_hook_declarations(&sources).is_empty();
-        }
+        let (sources, _) =
+            load_plugin_hooks(&root, plugin_id, &store.plugin_data_root(plugin_id), paths);
+        self.has_hooks |= !plugin_hook_declarations(&sources).is_empty();
     }
 }
 

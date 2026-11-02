@@ -467,6 +467,14 @@ async fn run_add(config: &Config, add_args: AddArgs) -> Result<()> {
                 /*explicit_scopes*/ None,
                 /*configured_scopes*/ None,
                 oauth_config.discovered_scopes.clone(),
+                servers[&name]
+                    .oauth
+                    .as_ref()
+                    .and_then(|oauth| oauth.base_scopes.clone()),
+                servers[&name]
+                    .oauth
+                    .as_ref()
+                    .and_then(|oauth| oauth.default_scopes.clone()),
             );
             perform_oauth_login_retry_without_scopes(
                 credential_name.as_ref(),
@@ -593,8 +601,19 @@ async fn run_login(config: &Config, login_args: LoginArgs) -> Result<()> {
     } else {
         None
     };
-    let resolved_scopes =
-        resolve_oauth_scopes(explicit_scopes, server.scopes.clone(), discovered_scopes);
+    let resolved_scopes = resolve_oauth_scopes(
+        explicit_scopes,
+        server.scopes.clone(),
+        discovered_scopes,
+        server
+            .oauth
+            .as_ref()
+            .and_then(|oauth| oauth.base_scopes.clone()),
+        server
+            .oauth
+            .as_ref()
+            .and_then(|oauth| oauth.default_scopes.clone()),
+    );
     let credential_name = server.oauth_credential_name(&name);
     let callback_url =
         resolve_oauth_callback(server, &url, config.mcp_oauth_callback_url.as_deref())?;

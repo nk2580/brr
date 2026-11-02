@@ -15,6 +15,9 @@ use rmcp::model::ClientRequest;
 use rmcp::model::DEFAULT_MRTR_MAX_ROUNDS;
 use rmcp::model::GetExtensions;
 use rmcp::model::GetMeta;
+use rmcp::model::GetPromptRequest;
+use rmcp::model::GetPromptRequestParams;
+use rmcp::model::GetPromptResult;
 use rmcp::model::InputRequest;
 use rmcp::model::ReadResourceRequest;
 use rmcp::model::ReadResourceRequestParams;
@@ -81,6 +84,25 @@ pub(crate) async fn read_resource(
     }
 }
 
+pub(crate) async fn get_prompt(
+    service: &RunningService<RoleClient, ElicitationClientService>,
+    input_service: &ElicitationClientService,
+    params: GetPromptRequestParams,
+    cancellation: RequestCancellation,
+) -> Result<GetPromptResult, ServiceError> {
+    match request(
+        service,
+        input_service,
+        ClientRequest::GetPromptRequest(GetPromptRequest::new(params)),
+        cancellation,
+    )
+    .await?
+    {
+        ServerResult::GetPromptResult(result) => Ok(result),
+        _ => Err(ServiceError::UnexpectedResponse),
+    }
+}
+
 async fn request(
     service: &RunningService<RoleClient, ElicitationClientService>,
     input_service: &ElicitationClientService,
@@ -116,7 +138,9 @@ async fn request(
             }
         })?;
         let input = match result {
-            result @ (ServerResult::CallToolResult(_) | ServerResult::ReadResourceResult(_)) => {
+            result @ (ServerResult::CallToolResult(_)
+            | ServerResult::ReadResourceResult(_)
+            | ServerResult::GetPromptResult(_)) => {
                 return Ok(result);
             }
             ServerResult::InputRequiredResult(result) => {
@@ -203,6 +227,10 @@ async fn request(
                 request.params.request_state = input.request_state;
             }
             ClientRequest::ReadResourceRequest(request) => {
+                request.params.input_responses = input_responses;
+                request.params.request_state = input.request_state;
+            }
+            ClientRequest::GetPromptRequest(request) => {
                 request.params.input_responses = input_responses;
                 request.params.request_state = input.request_state;
             }

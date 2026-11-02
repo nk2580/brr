@@ -103,6 +103,7 @@ fn serialize_mcp_server_table(config: &McpServerConfig) -> anyhow::Result<TomlTa
     }
 
     match config.auth {
+        McpServerAuth::None => entry["auth"] = value("none"),
         McpServerAuth::OAuth => {}
         McpServerAuth::ChatGpt => entry["auth"] = value("chatgpt"),
         McpServerAuth::EmaAuth => entry["auth"] = value("ema_auth"),

@@ -975,24 +975,19 @@ async fn load_plugin(
                 loaded_manifest.format,
             )
             .await;
-            if plugin_supports_apps(loaded_manifest.format, &loaded_plugin_id) {
+            if plugin_supports_apps(loaded_manifest.format, &loaded_plugin_id, manifest_paths) {
                 loaded_plugin.apps =
                     load_plugin_apps_from_manifest(plugin_root.as_path(), manifest_paths).await;
             }
         }
         PluginLoadScope::HooksOnly => {}
     }
-    let (hook_sources, hook_load_warnings) =
-        if loaded_manifest.format == PluginManifestFormat::AgentPlugin {
-            (Vec::new(), Vec::new())
-        } else {
-            load_plugin_hooks(
-                &plugin_root,
-                &loaded_plugin_id,
-                &plugin_data_root,
-                manifest_paths,
-            )
-        };
+    let (hook_sources, hook_load_warnings) = load_plugin_hooks(
+        &plugin_root,
+        &loaded_plugin_id,
+        &plugin_data_root,
+        manifest_paths,
+    );
     loaded_plugin.hook_sources = hook_sources;
     loaded_plugin.hook_load_warnings = hook_load_warnings;
     loaded_plugin
@@ -1166,7 +1161,11 @@ fn default_mcp_config_paths(plugin_root: &Path) -> Vec<AbsolutePathBuf> {
 
 pub async fn load_plugin_apps(plugin_root: &Path, plugin_id: &PluginId) -> Vec<AppDeclaration> {
     if let Some(loaded_manifest) = load_plugin_manifest_with_format(plugin_root) {
-        if !plugin_supports_apps(loaded_manifest.format, plugin_id) {
+        if !plugin_supports_apps(
+            loaded_manifest.format,
+            plugin_id,
+            &loaded_manifest.manifest.paths,
+        ) {
             return Vec::new();
         }
         return load_plugin_apps_from_manifest(plugin_root, &loaded_manifest.manifest.paths).await;
@@ -1410,7 +1409,7 @@ pub(crate) async fn plugin_capability_summary_from_root(
     mcp_server_names.sort_unstable();
     mcp_server_names.dedup();
 
-    let app_declarations = if plugin_supports_apps(manifest_format, plugin_id) {
+    let app_declarations = if plugin_supports_apps(manifest_format, plugin_id, manifest_paths) {
         load_plugin_apps_from_manifest(plugin_root.as_path(), manifest_paths).await
     } else {
         Vec::new()
@@ -1568,15 +1567,35 @@ pub(crate) async fn load_plugin_mcp_servers_from_manifest_with_format(
     plugin_data_root: Option<&Path>,
     manifest_format: PluginManifestFormat,
 ) -> HashMap<String, McpServerConfig> {
-    let mut mcp_servers = HashMap::new();
+    load_plugin_mcp_discovery_from_manifest_with_format(
+        plugin_root,
+        manifest_paths,
+        plugin_policy,
+        plugin_data_root,
+        manifest_format,
+    )
+    .await
+    .mcp_servers
+}
+
+pub(crate) async fn load_plugin_mcp_discovery_from_manifest_with_format(
+    plugin_root: &Path,
+    manifest_paths: &PluginManifestPaths,
+    plugin_policy: Option<&HashMap<String, PluginMcpServerConfig>>,
+    plugin_data_root: Option<&Path>,
+    manifest_format: PluginManifestFormat,
+) -> PluginMcpDiscovery {
+    let mut discovery = PluginMcpDiscovery::default();
     match &manifest_paths.mcp_servers {
         Some(PluginManifestMcpServers::Object(object_servers)) => {
             let plugin_mcp = load_mcp_servers_from_manifest_object(plugin_root, object_servers);
+            discovery.errors.extend(plugin_mcp.errors);
+            discovery.auth.extend(plugin_mcp.auth);
             for (name, mut config) in plugin_mcp.mcp_servers {
                 if let Some(policy) = plugin_policy.and_then(|policy| policy.get(&name)) {
                     apply_plugin_mcp_server_policy(&mut config, policy);
                 }
-                if mcp_servers.insert(name.clone(), config).is_some() {
+                if discovery.mcp_servers.insert(name.clone(), config).is_some() {
                     warn!(
                         plugin = %plugin_root.display(),
                         server = name,
@@ -1594,11 +1613,13 @@ pub(crate) async fn load_plugin_mcp_servers_from_manifest_with_format(
                     &mcp_config_path,
                 )
                 .await;
+                discovery.errors.extend(plugin_mcp.errors);
+                discovery.auth.extend(plugin_mcp.auth);
                 for (name, mut config) in plugin_mcp.mcp_servers {
                     if let Some(policy) = plugin_policy.and_then(|policy| policy.get(&name)) {
                         apply_plugin_mcp_server_policy(&mut config, policy);
                     }
-                    if mcp_servers.insert(name.clone(), config).is_some() {
+                    if discovery.mcp_servers.insert(name.clone(), config).is_some() {
                         warn!(
                             plugin = %plugin_root.display(),
                             path = %mcp_config_path.display(),
@@ -1612,10 +1633,11 @@ pub(crate) async fn load_plugin_mcp_servers_from_manifest_with_format(
     }
 
     if manifest_format == PluginManifestFormat::AgentPlugin {
-        agent_plugin_mcp_overlay::apply_codex_env_overlay(plugin_root, &mut mcp_servers).await;
+        agent_plugin_mcp_overlay::apply_codex_env_overlay(plugin_root, &mut discovery.mcp_servers)
+            .await;
     }
 
-    mcp_servers
+    discovery
 }
 
 async fn load_mcp_servers_from_file(
@@ -1714,17 +1736,22 @@ async fn load_mcp_servers_from_file(
             !matches!(&server.transport, McpServerTransportConfig::Stdio { .. })
         });
     }
-    for error in parsed.errors {
+    let errors = parsed.errors;
+    let auth = parsed.auth;
+    for error in &errors {
         warn!(
             plugin = %plugin_root.display(),
-            server = error.name,
+            server = %error.name,
             path = %mcp_config_path.display(),
-            error = error.message,
+            error = %error.message,
+            auth_descriptor = ?error.auth_descriptor,
             "failed to parse plugin MCP server"
         );
     }
     PluginMcpDiscovery {
         mcp_servers: parsed.servers.into_iter().collect(),
+        errors,
+        auth,
     }
 }
 
@@ -1742,22 +1769,29 @@ fn load_mcp_servers_from_manifest_object(
             return PluginMcpDiscovery::default();
         }
     };
-    for error in parsed.errors {
+    let errors = parsed.errors;
+    let auth = parsed.auth;
+    for error in &errors {
         warn!(
             plugin = %plugin_root.display(),
-            server = error.name,
-            error = error.message,
+            server = %error.name,
+            error = %error.message,
+            auth_descriptor = ?error.auth_descriptor,
             "failed to parse plugin manifest MCP object server"
         );
     }
     PluginMcpDiscovery {
         mcp_servers: parsed.servers.into_iter().collect(),
+        errors,
+        auth,
     }
 }
 
 #[derive(Debug, Default)]
-struct PluginMcpDiscovery {
-    mcp_servers: HashMap<String, McpServerConfig>,
+pub(crate) struct PluginMcpDiscovery {
+    pub(crate) mcp_servers: HashMap<String, McpServerConfig>,
+    pub(crate) errors: Vec<codex_mcp::PluginMcpServerParseError>,
+    pub(crate) auth: Vec<codex_mcp::PluginMcpServerAuthInfo>,
 }
 
 #[derive(Debug)]

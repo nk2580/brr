@@ -257,11 +257,12 @@ async fn load_plugin_metadata(
     .collect::<Vec<_>>();
     mcp_server_names.sort_unstable();
     mcp_server_names.dedup();
-    let app_declarations = if plugin_supports_apps(loaded_manifest.format, &plugin_id) {
-        load_plugin_apps_from_manifest(plugin_root.as_path(), &manifest.paths).await
-    } else {
-        Vec::new()
-    };
+    let app_declarations =
+        if plugin_supports_apps(loaded_manifest.format, &plugin_id, &manifest.paths) {
+            load_plugin_apps_from_manifest(plugin_root.as_path(), &manifest.paths).await
+        } else {
+            Vec::new()
+        };
 
     Ok(Arc::new(ToolSuggestMetadataFragment {
         config_name: plugin.id.clone(),

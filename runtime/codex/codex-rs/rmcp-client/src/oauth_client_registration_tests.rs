@@ -103,6 +103,21 @@ async fn authorization(
     redirect_uri: &str,
     registration: McpOAuthClientRegistration,
 ) -> Result<(OAuthState, HashMap<String, String>)> {
+    authorization_with_metadata(
+        server,
+        redirect_uri,
+        registration,
+        Some("https://brr.example/oauth/client.json"),
+    )
+    .await
+}
+
+async fn authorization_with_metadata(
+    server: &MockServer,
+    redirect_uri: &str,
+    registration: McpOAuthClientRegistration,
+    client_metadata_url: Option<&str>,
+) -> Result<(OAuthState, HashMap<String, String>)> {
     let prepared = start_authorization(
         &format!("{}/mcp", server.uri()),
         Arc::new(OAuthHttpClientAdapter::new(
@@ -116,6 +131,8 @@ async fn authorization(
         redirect_uri,
         CALLBACK_ID,
         registration,
+        client_metadata_url,
+        None,
     )
     .await?;
     let state = prepared.oauth_state;
@@ -133,19 +150,19 @@ async fn automatic_cimd_uses_stable_or_callback_specific_identity() -> Result<()
         (
             "127.0.0.1",
             false,
-            "https://chatgpt.com/oauth/codex/abc123ABC_-x/client.json",
+            "https://brr.example/oauth/client.json",
             "http://127.0.0.1:43123/callback/abc123ABC_-x",
         ),
         (
             "localhost",
             false,
-            "https://chatgpt.com/oauth/codex/abc123ABC_-x/client.json",
+            "https://brr.example/oauth/client.json",
             "http://localhost:43123/callback/abc123ABC_-x",
         ),
         (
             "127.0.0.1",
             true,
-            "https://chatgpt.com/oauth/codex/client.json",
+            "https://brr.example/oauth/client.json",
             "http://127.0.0.1:43123/callback",
         ),
     ] {
@@ -191,6 +208,25 @@ async fn automatic_cimd_uses_stable_or_callback_specific_identity() -> Result<()
         );
     }
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn automatic_registration_falls_back_to_dcr_without_host_metadata_identity() -> Result<()> {
+    let server = oauth_server(json!({
+        "client_id_metadata_document_supported": true,
+    }))
+    .await;
+    let redirect = "http://127.0.0.1:43123/callback";
+    let (_, query) =
+        authorization_with_metadata(&server, redirect, McpOAuthClientRegistration::Auto, None)
+            .await?;
+
+    assert_eq!(query["client_id"], "dcr-client");
+    let registrations = requests_to(&server, "/register").await;
+    assert_eq!(registrations.len(), 1);
+    let registration: Value = serde_json::from_slice(&registrations[0].body)?;
+    assert_eq!(registration["client_name"], "Codex");
     Ok(())
 }
 
@@ -480,6 +516,8 @@ async fn resource_headers_follow_same_origin_registration_redirect_and_sdk_auth_
         &redirect_uri,
         CALLBACK_ID,
         McpOAuthClientRegistration::Dcr,
+        None,
+        None,
     )
     .await?;
     assert_eq!(

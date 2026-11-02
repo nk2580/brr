@@ -1642,6 +1642,9 @@ impl MessageProcessor {
             ClientRequest::PluginRead { params, .. } => {
                 self.plugin_processor.plugin_read(params).await
             }
+            ClientRequest::PluginMcpCredentialWrite { params, .. } => {
+                self.plugin_processor.plugin_mcp_credential_write(params).await
+            }
             ClientRequest::PluginSkillRead { params, .. } => {
                 self.plugin_processor.plugin_skill_read(params).await
             }
@@ -1793,6 +1796,21 @@ impl MessageProcessor {
             ClientRequest::McpResourceRead { params, .. } => {
                 self.mcp_processor
                     .mcp_resource_read(&request_id, params)
+                    .await
+            }
+            ClientRequest::McpServerPromptsList { params, .. } => {
+                self.mcp_processor
+                    .mcp_server_prompts_list(&request_id, params)
+                    .await
+            }
+            ClientRequest::McpServerPromptGet { params, .. } => {
+                self.mcp_processor
+                    .mcp_server_prompt_get(&request_id, params)
+                    .await
+            }
+            ClientRequest::McpServerCompletionComplete { params, .. } => {
+                self.mcp_processor
+                    .mcp_server_completion_complete(&request_id, params)
                     .await
             }
             ClientRequest::McpServerEventStreamStart { params, .. } => {

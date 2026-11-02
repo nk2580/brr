@@ -2706,9 +2706,58 @@
       ],
       "type": "object"
     },
+    "McpOAuthClientRegistrationMode": {
+      "description": "Registration mode selected by a portable plugin or host MCP configuration.",
+      "enum": [
+        "auto",
+        "cimd",
+        "dcr"
+      ],
+      "type": "string"
+    },
+    "McpOAuthTokenEndpointAuthMethod": {
+      "description": "Token endpoint client authentication advertised by a portable MCP plugin.",
+      "enum": [
+        "none",
+        "client_secret_basic",
+        "client_secret_post",
+        "private_key_jwt"
+      ],
+      "type": "string"
+    },
+    "McpPrivateKeyJwtConfig": {
+      "additionalProperties": false,
+      "description": "Host-owned signer material for OAuth `private_key_jwt` client authentication.",
+      "properties": {
+        "algorithm": {
+          "description": "JWS signing algorithm supported by the native signer.",
+          "type": "string"
+        },
+        "key_id": {
+          "description": "Optional provider-registered key identifier.",
+          "type": "string"
+        },
+        "private_key": {
+          "description": "Private PEM, resolved into process memory from the system credential store.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "algorithm",
+        "private_key"
+      ],
+      "type": "object"
+    },
     "McpServerAuth": {
       "description": "Authentication flow for an HTTP MCP server. Explicit credentials take precedence for OAuth and ChatGPT; EMA rejects alternate credentials and fallback.",
       "oneOf": [
+        {
+          "description": "Connect without using stored MCP OAuth credentials or a ChatGPT token.",
+          "enum": [
+            "none"
+          ],
+          "type": "string"
+        },
         {
           "description": "Use stored MCP OAuth credentials when available. Starting an OAuth login is a separate operation.",
           "enum": [
@@ -2788,9 +2837,24 @@
       "additionalProperties": false,
       "description": "Client settings for MCP OAuth login or enterprise token exchange.",
       "properties": {
+        "authorization_server_base": {
+          "description": "Authorization-server base used to resolve portable OAuth endpoint overrides.",
+          "type": "string"
+        },
         "authorization_server_issuer": {
           "description": "Expected resource authorization server issuer for EMA token exchange.",
           "type": "string"
+        },
+        "authorization_url": {
+          "description": "Explicit authorization endpoint for a portable OAuth server.",
+          "type": "string"
+        },
+        "base_scopes": {
+          "description": "Scopes included in every authorization request.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         },
         "callback_port": {
           "description": "Fixed callback port that takes precedence over Codex's global OAuth callback port.",
@@ -2806,8 +2870,66 @@
           "description": "Explicit OAuth client identifier to present during authorization and token exchange.",
           "type": "string"
         },
+        "client_metadata_url": {
+          "description": "Host-owned CIMD document URL. Plugin declarations cannot select a host identity.",
+          "type": "string"
+        },
+        "client_registration": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/McpOAuthClientRegistrationMode"
+            }
+          ],
+          "description": "Client registration preference for an ordinary MCP OAuth login."
+        },
         "client_secret": {
           "description": "OAuth client secret used for token exchange with a pre-registered client.",
+          "type": "string"
+        },
+        "client_token_endpoint_auth_method": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/McpOAuthTokenEndpointAuthMethod"
+            }
+          ],
+          "description": "Authentication method for an ordinary registered MCP OAuth client."
+        },
+        "default_scopes": {
+          "description": "Scopes used when no explicit or discovered scopes are available.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "oidc_configuration_url": {
+          "description": "Explicit OpenID Connect discovery document URL.",
+          "type": "string"
+        },
+        "oidc_enabled": {
+          "description": "Whether OpenID Connect discovery is enabled for this OAuth server.",
+          "type": "boolean"
+        },
+        "oidc_scopes_supported": {
+          "description": "Explicit scopes supported by the OpenID Connect provider.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "oidc_userinfo_endpoint": {
+          "description": "Explicit OpenID Connect userinfo endpoint.",
+          "type": "string"
+        },
+        "private_key_jwt": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/McpPrivateKeyJwtConfig"
+            }
+          ],
+          "description": "Registered private-key JWT credentials, loaded from the host credential store."
+        },
+        "registration_url": {
+          "description": "Explicit dynamic-client-registration endpoint for a portable OAuth server.",
           "type": "string"
         },
         "token_endpoint_auth_method": {
@@ -2817,6 +2939,10 @@
             }
           ],
           "description": "Registered EMA client authentication method. Defaults to client_secret_basic when a secret is configured; requires a client secret."
+        },
+        "token_url": {
+          "description": "Explicit token endpoint for a portable OAuth server.",
+          "type": "string"
         }
       },
       "type": "object"

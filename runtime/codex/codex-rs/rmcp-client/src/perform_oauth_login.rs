@@ -10,6 +10,8 @@ use anyhow::Result;
 use anyhow::anyhow;
 use anyhow::bail;
 use codex_config::McpEmaTokenEndpointAuthMethod;
+use codex_config::McpOAuthTokenEndpointAuthMethod;
+use codex_config::McpPrivateKeyJwtConfig;
 use codex_config::McpServerOAuthConfig;
 use codex_exec_server::HttpClient;
 use codex_otel::auth_storage::AuthStorageOriginator;
@@ -45,6 +47,10 @@ use crate::oauth_client_registration::McpOAuthClientRegistration;
 use crate::oauth_client_registration::PreparedOAuthLogin;
 use crate::oauth_client_registration::start_authorization as start_client_registration;
 use crate::oauth_http_client::OAuthHttpClientAdapter;
+use crate::oauth_metadata_overrides::OAuthMetadataOverrides;
+use crate::oauth_private_key_jwt::OAuthPrivateKeyJwt;
+use crate::oauth_token_http_client::OAuthTokenEndpointAuth;
+use crate::oauth_token_http_client::OAuthTokenHttpClient;
 use crate::save_oauth_tokens;
 use crate::utils::build_default_headers;
 use codex_config::types::AuthKeyringBackendKind;
@@ -600,14 +606,20 @@ impl OauthLoginFlow {
                 .as_ref()
                 .is_some_and(|headers| !headers.is_empty());
         let default_headers = build_default_headers(http_headers, env_http_headers)?;
+        let metadata_overrides =
+            crate::oauth_metadata_config::from_config(oauth_config, oauth_resource)?;
         let oauth_http_client: Arc<dyn OAuthHttpClient> =
-            Arc::new(OAuthHttpClientAdapter::new_with_redirect_mode(
-                http_client,
-                default_headers,
-                server_url,
-                has_configured_headers,
-                redirect_mode,
-            )?);
+            metadata_overrides.wrap_http_client(Arc::new(
+                OAuthHttpClientAdapter::new_with_redirect_mode(
+                    http_client,
+                    default_headers,
+                    server_url,
+                    has_configured_headers,
+                    redirect_mode,
+                )?
+                .with_oidc_discovery_enabled(metadata_overrides.oidc_discovery_enabled())
+                .with_oidc_configuration_url(metadata_overrides.oidc_configuration_url().cloned()),
+            ));
         let registered_authorization = if oauth_client_id.is_some() {
             Some(
                 resolve_authorization_manager(
@@ -619,6 +631,15 @@ impl OauthLoginFlow {
                         .as_ref()
                         .map(|secret| secret.secret().as_str()),
                     oauth_config.and_then(|config| config.token_endpoint_auth_method),
+                    oauth_config.and_then(|config| config.client_token_endpoint_auth_method),
+                    oauth_config.and_then(|config| config.private_key_jwt.as_ref()),
+                    credentials.client_id.clone(),
+                    credentials
+                        .client_secret
+                        .as_ref()
+                        .map(|secret| secret.secret().to_string()),
+                    oauth_resource,
+                    &metadata_overrides,
                 )
                 .await?,
             )
@@ -713,6 +734,14 @@ impl OauthLoginFlow {
             } else {
                 append_callback_id_to_redirect_uri(&redirect_uri, &callback_id)?
             };
+            let mut metadata = metadata;
+            if scopes.is_empty()
+                && oauth_config
+                    .and_then(|config| config.default_scopes.as_ref())
+                    .is_some_and(Vec::is_empty)
+            {
+                metadata.scopes_supported = None;
+            }
             start_authorization(
                 auth_manager,
                 metadata,
@@ -732,14 +761,22 @@ impl OauthLoginFlow {
                 &redirect_uri,
                 &callback_id,
                 client_registration,
+                oauth_config.and_then(|config| config.client_metadata_url.as_deref()),
+                &metadata_overrides,
+                scopes.is_empty()
+                    && oauth_config
+                        .and_then(|config| config.default_scopes.as_ref())
+                        .is_some_and(Vec::is_empty),
             )
             .await?
         };
         let callback_path = callback_path_from_redirect_uri(&redirect_uri)?;
+        let resource_url = Url::parse(server_url).context("invalid MCP OAuth resource URL")?;
+        let authorization_resource = metadata_overrides.effective_resource(&resource_url);
         let auth_url = append_query_param(
             &oauth_state.get_authorization_url().await?,
             "resource",
-            oauth_resource,
+            authorization_resource.as_ref().map(Url::as_str),
         );
         let timeout_secs = timeout_secs.unwrap_or(DEFAULT_OAUTH_TIMEOUT_SECS).max(1);
         let timeout = Duration::from_secs(timeout_secs as u64);
@@ -877,6 +914,12 @@ async fn resolve_authorization_manager(
     purpose: OAuthLoginPurpose,
     client_secret: Option<&str>,
     token_endpoint_auth_method: Option<McpEmaTokenEndpointAuthMethod>,
+    client_token_endpoint_auth_method: Option<McpOAuthTokenEndpointAuthMethod>,
+    private_key_jwt: Option<&McpPrivateKeyJwtConfig>,
+    client_id: Option<String>,
+    client_secret_for_token_request: Option<String>,
+    _oauth_resource: Option<&str>,
+    metadata_overrides: &OAuthMetadataOverrides,
 ) -> Result<(AuthorizationManager, AuthorizationMetadata)> {
     if matches!(purpose, OAuthLoginPurpose::EnterpriseIdp) {
         return resolve_enterprise_authorization_manager(
@@ -887,11 +930,110 @@ async fn resolve_authorization_manager(
         )
         .await;
     }
-    let mut auth_manager =
-        AuthorizationManager::new_with_oauth_http_client(server_url, http_client).await?;
-    auth_manager.set_allow_missing_issuer(true);
-    let metadata = auth_manager.resolve_metadata().await?.metadata;
+    let resource_url = Url::parse(server_url).context("invalid MCP OAuth resource URL")?;
+    let discovery_base = metadata_overrides
+        .metadata_discovery_base(&resource_url)
+        .to_string();
+    let mut discovery_manager = AuthorizationManager::new_with_oauth_http_client(
+        discovery_base.clone(),
+        Arc::clone(&http_client),
+    )
+    .await?;
+    discovery_manager.set_allow_missing_issuer(true);
+    let discovered_metadata = match discovery_manager.resolve_metadata().await {
+        Ok(resolved) => Some(resolved.metadata),
+        Err(error) => {
+            if metadata_overrides.apply_to_metadata(None).is_err() {
+                return Err(error.into());
+            }
+            None
+        }
+    };
+    let metadata = metadata_overrides.apply_to_metadata(discovered_metadata)?;
     validate_authorization_server_endpoints(&metadata)?;
+    let explicit_token_auth = client_token_endpoint_auth_method.or_else(|| {
+        if private_key_jwt.is_some() {
+            Some(McpOAuthTokenEndpointAuthMethod::PrivateKeyJwt)
+        } else {
+            client_secret_for_token_request
+                .as_ref()
+                .map(|_| McpOAuthTokenEndpointAuthMethod::ClientSecretBasic)
+        }
+    });
+    let auth_manager = if let Some(method) = explicit_token_auth {
+        let token_endpoint = Url::parse(&metadata.token_endpoint)
+            .context("OAuth metadata contains an invalid token endpoint")?;
+        let auth = match method {
+            McpOAuthTokenEndpointAuthMethod::None => OAuthTokenEndpointAuth::Public,
+            McpOAuthTokenEndpointAuthMethod::ClientSecretBasic => {
+                let secret = client_secret_for_token_request.clone().ok_or_else(|| {
+                    anyhow!("OAuth client_secret_basic requires a configured client secret")
+                })?;
+                OAuthTokenEndpointAuth::ClientSecretBasic(secret)
+            }
+            McpOAuthTokenEndpointAuthMethod::ClientSecretPost => {
+                let secret = client_secret_for_token_request.clone().ok_or_else(|| {
+                    anyhow!("OAuth client_secret_post requires a configured client secret")
+                })?;
+                OAuthTokenEndpointAuth::ClientSecretPost(secret)
+            }
+            McpOAuthTokenEndpointAuthMethod::PrivateKeyJwt => {
+                let private_key = private_key_jwt.ok_or_else(|| {
+                    anyhow!("OAuth private_key_jwt requires a configured signing key")
+                })?;
+                let client_id = client_id
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("OAuth private_key_jwt requires a client ID"))?;
+                OAuthTokenEndpointAuth::PrivateKeyJwt(Arc::new(OAuthPrivateKeyJwt::new(
+                    client_id.clone(),
+                    &token_endpoint,
+                    &private_key.algorithm,
+                    private_key.private_key.as_str(),
+                    private_key.key_id.clone(),
+                )?))
+            }
+        };
+        let token_http = OAuthTokenHttpClient::new(
+            http_client,
+            token_endpoint,
+            client_id.ok_or_else(|| anyhow!("OAuth token policy requires a client ID"))?,
+            auth,
+            metadata_overrides
+                .effective_resource(&Url::parse(server_url)?)
+                .as_ref()
+                .map(ToString::to_string),
+        )?;
+        let mut manager = AuthorizationManager::new_with_oauth_http_client(
+            discovery_base.clone(),
+            Arc::new(token_http),
+        )
+        .await?;
+        manager.set_allow_missing_issuer(true);
+        manager.set_metadata(metadata.clone());
+        manager
+    } else if let Some(resource) = metadata_overrides.effective_resource(&resource_url) {
+        let token_endpoint = Url::parse(&metadata.token_endpoint)
+            .context("OAuth metadata contains an invalid token endpoint")?;
+        let token_http = OAuthTokenHttpClient::for_discovered_client(
+            http_client,
+            token_endpoint,
+            Some(resource.to_string()),
+        )?;
+        let mut manager = AuthorizationManager::new_with_oauth_http_client(
+            discovery_base.clone(),
+            Arc::new(token_http),
+        )
+        .await?;
+        manager.set_allow_missing_issuer(true);
+        manager.set_metadata(metadata.clone());
+        manager
+    } else {
+        let mut manager =
+            AuthorizationManager::new_with_oauth_http_client(discovery_base, http_client).await?;
+        manager.set_allow_missing_issuer(true);
+        manager.set_metadata(metadata.clone());
+        manager
+    };
     Ok((auth_manager, metadata))
 }
 
@@ -943,7 +1085,21 @@ fn append_query_param(url: &str, key: &str, value: Option<&str>) -> String {
         return url.to_string();
     }
     if let Ok(mut parsed) = Url::parse(url) {
-        parsed.query_pairs_mut().append_pair(key, value);
+        let existing = parsed
+            .query_pairs()
+            .filter(|(existing_key, _)| existing_key != key)
+            .map(|(existing_key, existing_value)| {
+                (existing_key.into_owned(), existing_value.into_owned())
+            })
+            .collect::<Vec<_>>();
+        parsed.set_query(None);
+        {
+            let mut query = parsed.query_pairs_mut();
+            for (existing_key, existing_value) in existing {
+                query.append_pair(&existing_key, &existing_value);
+            }
+            query.append_pair(key, value);
+        }
         return parsed.to_string();
     }
     let encoded = urlencoding::encode(value);
@@ -1202,6 +1358,11 @@ mod tests {
                 OAuthLoginPurpose::Mcp,
                 /*client_secret*/ None,
                 /*token_endpoint_auth_method*/ None,
+                /*client_token_endpoint_auth_method*/ None,
+                /*private_key_jwt*/ None,
+                /*client_id*/ None,
+                /*client_secret_for_token_request*/ None,
+                /*oauth_resource*/ None,
             )
             .await
             .expect("resolve pre-registered OAuth metadata");
@@ -1314,6 +1475,11 @@ mod tests {
                 OAuthLoginPurpose::Mcp,
                 /*client_secret*/ None,
                 /*token_endpoint_auth_method*/ None,
+                /*client_token_endpoint_auth_method*/ None,
+                /*private_key_jwt*/ None,
+                /*client_id*/ None,
+                /*client_secret_for_token_request*/ None,
+                /*oauth_resource*/ None,
             )
             .await
             .expect("resolve issuer-aware authorization metadata");
@@ -1574,9 +1740,9 @@ mod tests {
     }
 
     #[test]
-    fn append_query_param_adds_resource_to_absolute_url() {
+    fn append_query_param_replaces_sdk_resource_on_absolute_url() {
         let url = append_query_param(
-            "https://example.com/authorize?scope=read",
+            "https://example.com/authorize?scope=read&resource=old",
             "resource",
             Some("https://api.example.com"),
         );
@@ -1584,6 +1750,20 @@ mod tests {
         assert_eq!(
             url,
             "https://example.com/authorize?scope=read&resource=https%3A%2F%2Fapi.example.com"
+        );
+    }
+
+    #[test]
+    fn append_query_param_replaces_duplicate_resource_without_dropping_other_params() {
+        let url = append_query_param(
+            "https://example.com/authorize?scope=read&resource=old&state=opaque&resource=older",
+            "resource",
+            Some("https://api.example.com/new"),
+        );
+
+        assert_eq!(
+            url,
+            "https://example.com/authorize?scope=read&state=opaque&resource=https%3A%2F%2Fapi.example.com%2Fnew"
         );
     }
 

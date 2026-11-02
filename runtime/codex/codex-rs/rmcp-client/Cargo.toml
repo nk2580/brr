@@ -30,6 +30,7 @@ codex-utils-home-dir = { workspace = true }
 bytes = { workspace = true }
 futures = { workspace = true, default-features = false, features = ["std"] }
 http = { workspace = true }
+jsonwebtoken = { workspace = true }
 keyring = { workspace = true, features = ["crypto-rust"] }
 memchr = { workspace = true }
 oauth2 = "5"
@@ -66,6 +67,7 @@ tokio-util = { workspace = true, features = ["rt"] }
 tracing = { workspace = true, features = ["log"] }
 url = { workspace = true }
 urlencoding = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }
 webbrowser = { workspace = true }
 which = { workspace = true }
 

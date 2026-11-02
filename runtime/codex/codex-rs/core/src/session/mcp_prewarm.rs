@@ -12,6 +12,19 @@ impl Session {
         self.request_mcp_runtime_reprojection();
     }
 
+    /// Rebuilds MCP connections when a host-owned credential is rotated or revoked.
+    pub(crate) async fn request_mcp_runtime_reconnect(&self) {
+        let Ok(_refresh) = self.mcp_refresh.acquire().await else {
+            return;
+        };
+        self.services
+            .mcp_runtime
+            .revoke_agent_plugin_connections()
+            .await;
+        self.services.mcp_runtime.reconnect_on_next_refresh();
+        self.request_mcp_runtime_refresh();
+    }
+
     /// Reproject contributor state without invalidating cached MCP resources.
     pub(crate) fn request_mcp_runtime_reprojection(&self) {
         self.mark_mcp_runtime_dirty();

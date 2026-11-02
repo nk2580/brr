@@ -122,6 +122,7 @@ use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_git_discovery::GitRootDiscovery;
 use futures::StreamExt;
 use futures::future::BoxFuture;
+use futures::future::join_all;
 use futures::stream::FuturesUnordered;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -985,6 +986,17 @@ impl ThreadManager {
 
     /// Refreshes every loaded thread and marks threads that are still being created.
     pub async fn invalidate_mcp_runtimes(&self) {
+        self.invalidate_mcp_runtimes_with_reconnect(/*reconnect*/ false)
+            .await;
+    }
+
+    /// Reconnects every loaded MCP runtime after host-owned credentials change.
+    pub async fn reconnect_mcp_runtimes(&self) {
+        self.invalidate_mcp_runtimes_with_reconnect(/*reconnect*/ true)
+            .await;
+    }
+
+    async fn invalidate_mcp_runtimes_with_reconnect(&self, reconnect: bool) {
         self.invalidate_starting_mcp_runtimes();
         let threads = self
             .state
@@ -994,8 +1006,15 @@ impl ThreadManager {
             .values()
             .cloned()
             .collect::<Vec<_>>();
-        for thread in threads {
-            thread.session.request_mcp_runtime_refresh();
+        if reconnect {
+            join_all(threads.iter().map(|thread| async move {
+                thread.session.request_mcp_runtime_reconnect().await;
+            }))
+            .await;
+        } else {
+            for thread in threads {
+                thread.session.request_mcp_runtime_refresh();
+            }
         }
     }
 

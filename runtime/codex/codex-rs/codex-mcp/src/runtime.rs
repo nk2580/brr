@@ -500,6 +500,24 @@ impl McpRuntime {
         self.reconnect_pending.store(true, Ordering::Release);
     }
 
+    /// Revokes active package-owned clients without closing the runtime's elicitation router.
+    pub async fn revoke_agent_plugin_connections(&self) {
+        let superseded = self
+            .superseded_connections
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .filter_map(Weak::upgrade)
+            .collect::<Vec<_>>();
+        let current = self.latest_connections();
+        futures::future::join_all(superseded.into_iter().chain(std::iter::once(current)).map(
+            |connections| async move {
+                connections.revoke_agent_plugin_connections().await;
+            },
+        ))
+        .await;
+    }
+
     /// Invalidates resource catalogs and contents even when connections can be reused.
     pub fn invalidate_resource_caches(&self) {
         self.resource_cache_generation
@@ -761,6 +779,37 @@ impl McpRuntime {
     ) -> anyhow::Result<ReadResourceResult> {
         self.latest_connections()
             .read_resource(server, params)
+            .await
+    }
+
+    pub async fn latest_list_prompts(
+        &self,
+        server: &str,
+        cursor: Option<String>,
+    ) -> anyhow::Result<serde_json::Value> {
+        self.latest_connections().list_prompts(server, cursor).await
+    }
+
+    pub async fn latest_get_prompt(
+        &self,
+        server: &str,
+        name: String,
+        arguments: Option<serde_json::Map<String, serde_json::Value>>,
+    ) -> anyhow::Result<rmcp::model::GetPromptResult> {
+        self.latest_connections()
+            .get_prompt(server, name, arguments)
+            .await
+    }
+
+    pub async fn latest_complete_prompt(
+        &self,
+        server: &str,
+        reference: serde_json::Value,
+        argument: serde_json::Value,
+        context: Option<serde_json::Value>,
+    ) -> anyhow::Result<serde_json::Value> {
+        self.latest_connections()
+            .complete_prompt(server, reference, argument, context)
             .await
     }
 

@@ -2,7 +2,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use anyhow::Context;
 use anyhow::Result;
+use codex_config::McpServerOAuthConfig;
 use codex_exec_server::HttpClient;
 use codex_protocol::protocol::McpAuthStatus;
 use futures::FutureExt;
@@ -21,6 +23,7 @@ use crate::oauth_http_client::OAuthHttpClientAdapter;
 use crate::utils::build_default_headers;
 use codex_config::types::AuthKeyringBackendKind;
 use codex_config::types::OAuthCredentialsStoreMode;
+use rmcp::transport::auth::OAuthHttpClient;
 
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -114,6 +117,51 @@ pub async fn determine_streamable_http_auth_status(
             discovery_timeout,
             has_configured_headers,
             redirect_mode,
+        )
+        .await,
+    )
+}
+
+/// OAuth status discovery that applies package-declared endpoint and OIDC policy.
+#[allow(clippy::too_many_arguments)]
+pub async fn determine_streamable_http_auth_status_with_config(
+    server_name: &str,
+    url: &str,
+    bearer_token_env_var: Option<&str>,
+    http_headers: Option<HashMap<String, String>>,
+    env_http_headers: Option<HashMap<String, String>>,
+    store_mode: OAuthCredentialsStoreMode,
+    keyring_backend_kind: AuthKeyringBackendKind,
+    http_client: Arc<dyn HttpClient>,
+    discovery_timeout: OAuthDiscoveryTimeout,
+    redirect_mode: StreamableHttpRedirectMode,
+    oauth_config: Option<&McpServerOAuthConfig>,
+    oauth_resource: Option<&str>,
+) -> Result<McpAuthState> {
+    let default_headers = match auth_status_before_discovery(
+        server_name,
+        url,
+        bearer_token_env_var,
+        http_headers.clone(),
+        env_http_headers.clone(),
+        store_mode,
+        keyring_backend_kind,
+    )? {
+        AuthStatusCheck::Complete(status) => return Ok(status),
+        AuthStatusCheck::Discover(default_headers) => default_headers,
+    };
+    determine_auth_status_from_discovery(
+        server_name,
+        url,
+        discover_streamable_http_oauth_with_config_and_headers(
+            url,
+            default_headers,
+            http_client,
+            discovery_timeout,
+            has_configured_headers(&http_headers, &env_http_headers),
+            redirect_mode,
+            oauth_config,
+            oauth_resource,
         )
         .await,
     )
@@ -214,6 +262,93 @@ pub async fn discover_streamable_http_oauth(
         redirect_mode,
     )
     .await
+}
+
+/// Discover OAuth support while honoring portable package overrides.
+#[allow(clippy::too_many_arguments)]
+pub async fn discover_streamable_http_oauth_with_config(
+    url: &str,
+    http_headers: Option<HashMap<String, String>>,
+    env_http_headers: Option<HashMap<String, String>>,
+    http_client: Arc<dyn HttpClient>,
+    discovery_timeout: OAuthDiscoveryTimeout,
+    redirect_mode: StreamableHttpRedirectMode,
+    oauth_config: Option<&McpServerOAuthConfig>,
+    oauth_resource: Option<&str>,
+) -> Result<Option<StreamableHttpOAuthDiscovery>> {
+    let has_configured_headers = has_configured_headers(&http_headers, &env_http_headers);
+    let default_headers = build_default_headers(http_headers, env_http_headers)?;
+    discover_streamable_http_oauth_with_config_and_headers(
+        url,
+        default_headers,
+        http_client,
+        discovery_timeout,
+        has_configured_headers,
+        redirect_mode,
+        oauth_config,
+        oauth_resource,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn discover_streamable_http_oauth_with_config_and_headers(
+    url: &str,
+    default_headers: HeaderMap,
+    http_client: Arc<dyn HttpClient>,
+    discovery_timeout: OAuthDiscoveryTimeout,
+    has_configured_headers: bool,
+    redirect_mode: StreamableHttpRedirectMode,
+    oauth_config: Option<&McpServerOAuthConfig>,
+    oauth_resource: Option<&str>,
+) -> Result<Option<StreamableHttpOAuthDiscovery>> {
+    let overrides = crate::oauth_metadata_config::from_config(oauth_config, oauth_resource)?;
+    let adapter = match discovery_timeout {
+        OAuthDiscoveryTimeout::Requested => OAuthHttpClientAdapter::new_with_redirect_mode(
+            http_client,
+            default_headers,
+            url,
+            has_configured_headers,
+            redirect_mode,
+        )?,
+        OAuthDiscoveryTimeout::Capped(max_timeout) => {
+            OAuthHttpClientAdapter::new_with_max_timeout_and_redirect_mode(
+                http_client,
+                default_headers,
+                url,
+                max_timeout,
+                has_configured_headers,
+                redirect_mode,
+            )?
+        }
+    }
+    .with_oidc_discovery_enabled(overrides.oidc_discovery_enabled())
+    .with_oidc_configuration_url(overrides.oidc_configuration_url().cloned());
+    let oauth_http_client: Arc<dyn OAuthHttpClient> = overrides.wrap_http_client(Arc::new(adapter));
+    let resource_url = url::Url::parse(url).context("invalid MCP OAuth resource URL")?;
+    let discovery_base = overrides.metadata_discovery_base(&resource_url).to_string();
+    let mut manager =
+        AuthorizationManager::new_with_oauth_http_client(discovery_base, oauth_http_client).await?;
+    manager.set_allow_missing_issuer(true);
+    let discovered = match manager.resolve_metadata().await {
+        Ok(resolved) if resolved.source.is_discovered() => Some(resolved.metadata),
+        Ok(resolved) if overrides.can_apply_without_discovery() => Some(resolved.metadata),
+        Ok(_) => return Ok(None),
+        Err(error) => {
+            if !overrides.can_apply_without_discovery() {
+                return Err(error.into());
+            }
+            None
+        }
+    };
+    let metadata = overrides.apply_to_metadata(discovered)?;
+    let callback_mode = callback_mode(&metadata).unwrap_or(McpOAuthCallbackMode::CallbackSpecific);
+    manager.set_metadata(metadata);
+    let scopes_supported = normalize_scopes(manager.select_initial_scopes(&[]).await);
+    Ok(Some(StreamableHttpOAuthDiscovery {
+        scopes_supported,
+        callback_mode,
+    }))
 }
 
 async fn discover_streamable_http_oauth_with_headers_and_http_client(

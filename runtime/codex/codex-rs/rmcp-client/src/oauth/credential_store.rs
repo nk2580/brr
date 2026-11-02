@@ -105,7 +105,20 @@ impl<K: KeyringStore + Clone + 'static> OAuthCredentialStore<K> {
         if !token_needs_refresh(tokens.expires_at) {
             return Ok(());
         }
-        let metadata = manager.resolve_metadata().await?.metadata;
+        let metadata_overrides =
+            crate::oauth_metadata_config::from_config(self.inner.oauth_config.as_ref(), None)?;
+        let discovered_metadata = match manager.resolve_metadata().await {
+            Ok(resolved) => Some(resolved.metadata),
+            Err(error) => {
+                if metadata_overrides.apply_to_metadata(None).is_err() {
+                    return Err(error).context(
+                        "failed to resolve OAuth metadata before using stored refresh credentials",
+                    );
+                }
+                None
+            }
+        };
+        let metadata = metadata_overrides.apply_to_metadata(discovered_metadata)?;
         validate_refresh_token_issuer(&metadata, &tokens)?;
         manager.set_metadata(metadata);
         manager.configure_client_id(&tokens.client_id)?;

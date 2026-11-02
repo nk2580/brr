@@ -267,6 +267,50 @@ pub struct PluginReadResponse {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[ts(export_to = "v2/")]
+pub enum PluginMcpCredential {
+    #[serde(rename = "oauth_private_key_jwt")]
+    OAuthPrivateKeyJwt {
+        #[serde(rename = "privateKey")]
+        #[ts(type = "string")]
+        private_key: codex_utils_redacted_string::RedactedString,
+        algorithm: String,
+        #[serde(rename = "keyId")]
+        key_id: Option<String>,
+    },
+    #[serde(rename = "oauth_client_secret")]
+    OAuthClientSecret {
+        #[ts(type = "string")]
+        secret: codex_utils_redacted_string::RedactedString,
+    },
+    Token {
+        #[ts(type = "string")]
+        token: codex_utils_redacted_string::RedactedString,
+    },
+    Basic {
+        #[ts(type = "string")]
+        username: codex_utils_redacted_string::RedactedString,
+        #[ts(type = "string")]
+        password: codex_utils_redacted_string::RedactedString,
+    },
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export_to = "v2/")]
+pub struct PluginMcpCredentialWriteParams {
+    pub plugin_id: String,
+    pub server_name: String,
+    /// Null removes the credential bound to the current package declaration.
+    pub credential: Option<PluginMcpCredential>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[ts(export_to = "v2/")]
+pub struct PluginMcpCredentialWriteResponse {}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct PluginSkillReadParams {
@@ -774,7 +818,36 @@ pub struct PluginDetail {
     pub apps: Vec<AppSummary>,
     pub app_templates: Vec<AppTemplateSummary>,
     pub mcp_servers: Vec<String>,
+    /// Invalid bundled MCP declarations, with sanitized auth metadata for setup guidance.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mcp_server_errors: Vec<PluginMcpServerErrorInfo>,
+    /// Configured portable MCP authentication declarations and keyring presence.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mcp_server_auth: Vec<PluginMcpServerAuthInfo>,
     pub scheduled_tasks: Option<Vec<ScheduledTaskSummary>>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct PluginMcpServerErrorInfo {
+    pub server_name: String,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub auth_descriptor: Option<serde_json::Value>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct PluginMcpServerAuthInfo {
+    pub server_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub auth_descriptor: Option<serde_json::Value>,
+    /// Presence only; secret values never leave the credential store.
+    pub credential_configured: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]

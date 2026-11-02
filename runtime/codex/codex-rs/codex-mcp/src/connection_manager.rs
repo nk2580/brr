@@ -110,6 +110,12 @@ pub(crate) struct McpServerConnection {
 }
 
 impl McpServerConnection {
+    fn has_agent_plugin_http_transport(&self) -> bool {
+        self.identity
+            .as_ref()
+            .is_some_and(McpServerConnectionIdentity::has_agent_plugin_http_transport)
+    }
+
     fn retained_legacy(&self) -> Option<&Arc<Self>> {
         self.legacy_fallback.as_deref().and_then(OnceLock::get)
     }
@@ -1006,6 +1012,7 @@ impl McpConnectionSet {
                         Err(error)
                             if error.is_authentication_required()
                                 && !has_runtime_auth
+                                && !matches!(configured_config.auth, McpServerAuth::None)
                                 && !matches!(configured_config.auth, McpServerAuth::EmaAuth) =>
                         {
                             match &configured_config.transport {
@@ -1246,6 +1253,17 @@ impl McpConnectionSet {
             .values()
             .map(|view| Arc::clone(&view.connection))
             .collect::<Vec<_>>();
+        Self::shutdown_connections(connections).await;
+    }
+
+    /// Terminates only package-owned connections carrying host-managed plugin credentials.
+    pub(crate) async fn revoke_agent_plugin_connections(&self) {
+        let connections = self
+            .servers
+            .values()
+            .filter(|view| view.connection.has_agent_plugin_http_transport())
+            .map(|view| Arc::clone(&view.connection))
+            .collect();
         Self::shutdown_connections(connections).await;
     }
 

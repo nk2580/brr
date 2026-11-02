@@ -359,6 +359,35 @@ impl McpResourceClient {
         Ok(McpResourceReadResult { contents })
     }
 
+    pub async fn list_prompts(&self, server: &str, cursor: Option<String>) -> Result<Value> {
+        self.runtime.latest_list_prompts(server, cursor).await
+    }
+
+    pub async fn get_prompt(
+        &self,
+        server: &str,
+        name: String,
+        arguments: Option<Map<String, Value>>,
+    ) -> Result<Value> {
+        let result = self
+            .runtime
+            .latest_get_prompt(server, name, arguments)
+            .await?;
+        serde_json::to_value(result).context("failed to serialize prompts/get result")
+    }
+
+    pub async fn complete_prompt(
+        &self,
+        server: &str,
+        reference: Value,
+        argument: Value,
+        context: Option<Value>,
+    ) -> Result<Value> {
+        self.runtime
+            .latest_complete_prompt(server, reference, argument, context)
+            .await
+    }
+
     /// Lists the events advertised by the MCP event server.
     pub async fn list_events(&self) -> Result<McpEventCatalogSnapshot> {
         let (connections, _) = self

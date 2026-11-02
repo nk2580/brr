@@ -1292,6 +1292,42 @@ impl CodexThread {
         Ok(serde_json::to_value(result)?)
     }
 
+    pub async fn list_mcp_prompts(
+        &self,
+        server: &str,
+        cursor: Option<String>,
+    ) -> anyhow::Result<serde_json::Value> {
+        self.session.refresh_mcp_if_dirty().await;
+        codex_mcp::McpResourceClient::new(Arc::clone(&self.session.services.mcp_runtime))
+            .list_prompts(server, cursor)
+            .await
+    }
+
+    pub async fn get_mcp_prompt(
+        &self,
+        server: &str,
+        name: String,
+        arguments: Option<serde_json::Map<String, serde_json::Value>>,
+    ) -> anyhow::Result<serde_json::Value> {
+        self.session.refresh_mcp_if_dirty().await;
+        codex_mcp::McpResourceClient::new(Arc::clone(&self.session.services.mcp_runtime))
+            .get_prompt(server, name, arguments)
+            .await
+    }
+
+    pub async fn complete_mcp_prompt(
+        &self,
+        server: &str,
+        reference: serde_json::Value,
+        argument: serde_json::Value,
+        context: Option<serde_json::Value>,
+    ) -> anyhow::Result<serde_json::Value> {
+        self.session.refresh_mcp_if_dirty().await;
+        codex_mcp::McpResourceClient::new(Arc::clone(&self.session.services.mcp_runtime))
+            .complete_prompt(server, reference, argument, context)
+            .await
+    }
+
     /// Inspects one server through this thread's current MCP connection.
     pub async fn mcp_server_status_snapshot(
         &self,

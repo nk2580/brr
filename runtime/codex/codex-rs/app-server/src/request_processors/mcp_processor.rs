@@ -5,6 +5,7 @@ use super::*;
 use codex_config::types::McpServerAuth;
 use codex_mcp::McpServerSource;
 use codex_mcp::ReadResourceRequestParams;
+use codex_mcp::discover_supported_scopes_with_config;
 use codex_mcp::ema_auth_scope;
 use codex_mcp::resolve_oauth_callback;
 use codex_otel::auth_storage::AuthStorageOriginator;
@@ -96,6 +97,188 @@ impl McpRequestProcessor {
             .map(|()| None)
     }
 
+    pub(crate) async fn mcp_server_prompts_list(
+        &self,
+        request_id: &ConnectionRequestId,
+        params: McpServerPromptsListParams,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        let outgoing = Arc::clone(&self.outgoing);
+        let request_id = request_id.clone();
+        let processor = self.clone();
+        let task = async move {
+            let result: Result<ClientResponsePayload, JSONRPCErrorError> = processor
+                .list_mcp_prompts_response(params)
+                .await
+                .map(Into::into);
+            outgoing.send_result(request_id, result).await;
+        };
+        tokio::spawn(AuthStorageOriginator::current().scope(task));
+        Ok(None)
+    }
+
+    pub(crate) async fn mcp_server_prompt_get(
+        &self,
+        request_id: &ConnectionRequestId,
+        params: McpServerPromptGetParams,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        let outgoing = Arc::clone(&self.outgoing);
+        let request_id = request_id.clone();
+        let processor = self.clone();
+        let task = async move {
+            let result: Result<ClientResponsePayload, JSONRPCErrorError> = processor
+                .get_mcp_prompt_response(params)
+                .await
+                .map(Into::into);
+            outgoing.send_result(request_id, result).await;
+        };
+        tokio::spawn(AuthStorageOriginator::current().scope(task));
+        Ok(None)
+    }
+
+    pub(crate) async fn mcp_server_completion_complete(
+        &self,
+        request_id: &ConnectionRequestId,
+        params: McpServerCompletionCompleteParams,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        let outgoing = Arc::clone(&self.outgoing);
+        let request_id = request_id.clone();
+        let processor = self.clone();
+        let task = async move {
+            let result: Result<ClientResponsePayload, JSONRPCErrorError> = processor
+                .complete_mcp_prompt_response(params)
+                .await
+                .map(Into::into);
+            outgoing.send_result(request_id, result).await;
+        };
+        tokio::spawn(AuthStorageOriginator::current().scope(task));
+        Ok(None)
+    }
+
+    async fn list_mcp_prompts_response(
+        &self,
+        params: McpServerPromptsListParams,
+    ) -> Result<McpServerPromptsListResponse, JSONRPCErrorError> {
+        let McpServerPromptsListParams {
+            server,
+            thread_id,
+            cursor,
+        } = params;
+        let result = if let Some(thread_id) = thread_id {
+            let (_, thread) = self.load_thread(&thread_id).await?;
+            thread.list_mcp_prompts(&server, cursor).await
+        } else {
+            let config = self.load_global_config().await?;
+            let mcp_manager = self.thread_manager.mcp_manager();
+            let mcp_config = mcp_manager.runtime_config(&config).await;
+            let auth = self.auth_manager.auth().await;
+            let environment_manager = self.thread_manager.environment_manager();
+            let runtime_context =
+                McpRuntimeContext::new(Arc::clone(&environment_manager), config.cwd.to_path_buf());
+            codex_mcp::list_mcp_prompts(
+                &mcp_config,
+                auth.as_ref(),
+                runtime_context,
+                mcp_manager.codex_apps_tools_cache(),
+                mcp_manager.tool_catalog_cache(),
+                &server,
+                cursor,
+            )
+            .await
+        }
+        .map_err(mcp_operation_error)?;
+        serde_json::from_value::<McpServerPromptsListResponse>(result)
+            .map_err(|error| internal_error(format!("invalid prompts/list response: {error}")))
+    }
+
+    async fn get_mcp_prompt_response(
+        &self,
+        params: McpServerPromptGetParams,
+    ) -> Result<McpServerPromptGetResponse, JSONRPCErrorError> {
+        let McpServerPromptGetParams {
+            server,
+            thread_id,
+            name,
+            arguments,
+        } = params;
+        let arguments = arguments.map(|arguments| {
+            arguments
+                .into_iter()
+                .map(|(key, value)| (key, serde_json::Value::String(value)))
+                .collect()
+        });
+        let result = if let Some(thread_id) = thread_id {
+            let (_, thread) = self.load_thread(&thread_id).await?;
+            thread.get_mcp_prompt(&server, name, arguments).await
+        } else {
+            let config = self.load_global_config().await?;
+            let mcp_manager = self.thread_manager.mcp_manager();
+            let mcp_config = mcp_manager.runtime_config(&config).await;
+            let auth = self.auth_manager.auth().await;
+            let runtime_context = McpRuntimeContext::new(
+                Arc::clone(&self.thread_manager.environment_manager()),
+                config.cwd.to_path_buf(),
+            );
+            codex_mcp::get_mcp_prompt(
+                &mcp_config,
+                auth.as_ref(),
+                runtime_context,
+                mcp_manager.codex_apps_tools_cache(),
+                mcp_manager.tool_catalog_cache(),
+                &server,
+                name,
+                arguments,
+            )
+            .await
+        }
+        .map_err(mcp_operation_error)?;
+        serde_json::from_value::<McpServerPromptGetResponse>(result)
+            .map_err(|error| internal_error(format!("invalid prompts/get response: {error}")))
+    }
+
+    async fn complete_mcp_prompt_response(
+        &self,
+        params: McpServerCompletionCompleteParams,
+    ) -> Result<McpServerCompletionCompleteResponse, JSONRPCErrorError> {
+        let McpServerCompletionCompleteParams {
+            server,
+            thread_id,
+            reference,
+            argument,
+            context,
+        } = params;
+        let result = if let Some(thread_id) = thread_id {
+            let (_, thread) = self.load_thread(&thread_id).await?;
+            thread
+                .complete_mcp_prompt(&server, reference, argument, context)
+                .await
+        } else {
+            let config = self.load_global_config().await?;
+            let mcp_manager = self.thread_manager.mcp_manager();
+            let mcp_config = mcp_manager.runtime_config(&config).await;
+            let auth = self.auth_manager.auth().await;
+            let runtime_context = McpRuntimeContext::new(
+                Arc::clone(&self.thread_manager.environment_manager()),
+                config.cwd.to_path_buf(),
+            );
+            codex_mcp::complete_mcp_prompt(
+                &mcp_config,
+                auth.as_ref(),
+                runtime_context,
+                mcp_manager.codex_apps_tools_cache(),
+                mcp_manager.tool_catalog_cache(),
+                &server,
+                reference,
+                argument,
+                context,
+            )
+            .await
+        }
+        .map_err(mcp_operation_error)?;
+        serde_json::from_value::<McpServerCompletionCompleteResponse>(result).map_err(|error| {
+            internal_error(format!("invalid completion/complete response: {error}"))
+        })
+    }
+
     async fn mcp_server_refresh_response(
         &self,
         _params: Option<()>,
@@ -174,6 +357,11 @@ impl McpRequestProcessor {
             StreamableHttpRedirectMode::Legacy
         };
         let server = server.config();
+        if matches!(server.auth, McpServerAuth::None) {
+            return Err(invalid_request(format!(
+                "MCP server '{name}' is configured for no authentication."
+            )));
+        }
         let enterprise = matches!(server.auth, McpServerAuth::EmaAuth);
         let (authorization_url, login_id, completion): (
             String,
@@ -287,8 +475,10 @@ impl McpRequestProcessor {
                     })?;
 
             let discovered_scopes = if scopes.is_none() && server.scopes.is_none() {
-                discover_supported_scopes(
+                discover_supported_scopes_with_config(
                     &server.transport,
+                    server.oauth.as_ref(),
+                    server.oauth_resource.as_deref(),
                     Arc::clone(&http_client),
                     codex_rmcp_client::OAuthDiscoveryTimeout::Requested,
                     redirect_mode,
@@ -297,13 +487,43 @@ impl McpRequestProcessor {
             } else {
                 None
             };
-            let resolved_scopes =
-                resolve_oauth_scopes(scopes, server.scopes.clone(), discovered_scopes);
+            let resolved_scopes = resolve_oauth_scopes(
+                scopes,
+                server.scopes.clone(),
+                discovered_scopes,
+                server
+                    .oauth
+                    .as_ref()
+                    .and_then(|oauth| oauth.base_scopes.clone()),
+                server
+                    .oauth
+                    .as_ref()
+                    .and_then(|oauth| oauth.default_scopes.clone()),
+            );
             let oauth_credential_name = server.oauth_credential_name(&name);
-            let client_registration = match client_registration.unwrap_or_default() {
-                McpServerOauthClientRegistration::Auto => McpOAuthClientRegistration::Auto,
-                McpServerOauthClientRegistration::Cimd => McpOAuthClientRegistration::Cimd,
-                McpServerOauthClientRegistration::Dcr => McpOAuthClientRegistration::Dcr,
+            let client_registration = if let Some(client_registration) = client_registration {
+                match client_registration {
+                    McpServerOauthClientRegistration::Auto => McpOAuthClientRegistration::Auto,
+                    McpServerOauthClientRegistration::Cimd => McpOAuthClientRegistration::Cimd,
+                    McpServerOauthClientRegistration::Dcr => McpOAuthClientRegistration::Dcr,
+                }
+            } else {
+                match server
+                    .oauth
+                    .as_ref()
+                    .and_then(|oauth| oauth.client_registration)
+                    .unwrap_or_default()
+                {
+                    codex_config::McpOAuthClientRegistrationMode::Auto => {
+                        McpOAuthClientRegistration::Auto
+                    }
+                    codex_config::McpOAuthClientRegistrationMode::Cimd => {
+                        McpOAuthClientRegistration::Cimd
+                    }
+                    codex_config::McpOAuthClientRegistrationMode::Dcr => {
+                        McpOAuthClientRegistration::Dcr
+                    }
+                }
             };
             let callback_url =
                 resolve_oauth_callback(server, &url, mcp_config.mcp_oauth_callback_url.as_deref())

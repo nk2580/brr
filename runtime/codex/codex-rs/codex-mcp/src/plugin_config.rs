@@ -32,6 +32,16 @@ enum PluginMcpSource<'a> {
 pub struct PluginMcpServerParseError {
     pub name: String,
     pub message: String,
+    /// Sanitized known auth fields, retained so setup UI can explain unsupported flows.
+    pub auth_descriptor: Option<serde_json::Value>,
+}
+
+/// Sanitized auth declaration for displaying setup state without exposing credentials.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PluginMcpServerAuthInfo {
+    pub name: String,
+    pub auth_descriptor: Option<serde_json::Value>,
+    pub credential_configured: bool,
 }
 
 /// Valid servers and per-server errors parsed from one plugin MCP file.
@@ -39,6 +49,7 @@ pub struct PluginMcpServerParseError {
 pub struct PluginMcpConfigParseOutcome {
     pub servers: BTreeMap<String, McpServerConfig>,
     pub errors: Vec<PluginMcpServerParseError>,
+    pub auth: Vec<PluginMcpServerAuthInfo>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -143,9 +154,11 @@ fn normalize_plugin_mcp_declarations(
             Ok(config) => {
                 outcome.servers.insert(name, config);
             }
-            Err(message) => outcome
-                .errors
-                .push(PluginMcpServerParseError { name, message }),
+            Err(message) => outcome.errors.push(PluginMcpServerParseError {
+                name,
+                message,
+                auth_descriptor: None,
+            }),
         }
     }
 

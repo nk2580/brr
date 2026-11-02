@@ -173,6 +173,62 @@ pub struct McpServerOAuthConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_endpoint_auth_method: Option<McpEmaTokenEndpointAuthMethod>,
 
+    /// Authentication method for an ordinary registered MCP OAuth client.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_token_endpoint_auth_method: Option<McpOAuthTokenEndpointAuthMethod>,
+
+    /// Registered private-key JWT credentials, loaded from the host credential store.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub private_key_jwt: Option<McpPrivateKeyJwtConfig>,
+
+    /// Client registration preference for an ordinary MCP OAuth login.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_registration: Option<McpOAuthClientRegistrationMode>,
+
+    /// Host-owned CIMD document URL. Plugin declarations cannot select a host identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_metadata_url: Option<String>,
+
+    /// Scopes included in every authorization request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_scopes: Option<Vec<String>>,
+
+    /// Scopes used when no explicit or discovered scopes are available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_scopes: Option<Vec<String>>,
+
+    /// Authorization-server base used to resolve portable OAuth endpoint overrides.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorization_server_base: Option<String>,
+
+    /// Explicit authorization endpoint for a portable OAuth server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorization_url: Option<String>,
+
+    /// Explicit token endpoint for a portable OAuth server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_url: Option<String>,
+
+    /// Explicit dynamic-client-registration endpoint for a portable OAuth server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registration_url: Option<String>,
+
+    /// Whether OpenID Connect discovery is enabled for this OAuth server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oidc_enabled: Option<bool>,
+
+    /// Explicit OpenID Connect discovery document URL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oidc_configuration_url: Option<String>,
+
+    /// Explicit OpenID Connect userinfo endpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oidc_userinfo_endpoint: Option<String>,
+
+    /// Explicit scopes supported by the OpenID Connect provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oidc_scopes_supported: Option<Vec<String>>,
+
     /// Registered callback URL associated with this OAuth client.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub callback_url: Option<String>,
@@ -191,11 +247,49 @@ pub struct McpServerOAuthConfig {
     pub ema_registration: Option<McpEmaRegistration>,
 }
 
+/// Host-owned signer material for OAuth `private_key_jwt` client authentication.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct McpPrivateKeyJwtConfig {
+    /// JWS signing algorithm supported by the native signer.
+    pub algorithm: String,
+
+    /// Optional provider-registered key identifier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_id: Option<String>,
+
+    /// Private PEM, resolved into process memory from the system credential store.
+    pub private_key: RedactedString,
+}
+
+/// Token endpoint client authentication advertised by a portable MCP plugin.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum McpOAuthTokenEndpointAuthMethod {
+    None,
+    ClientSecretBasic,
+    ClientSecretPost,
+    PrivateKeyJwt,
+}
+
+/// Registration mode selected by a portable plugin or host MCP configuration.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum McpOAuthClientRegistrationMode {
+    #[default]
+    Auto,
+    Cimd,
+    Dcr,
+}
+
 /// Authentication flow for an HTTP MCP server. Explicit credentials take
 /// precedence for OAuth and ChatGPT; EMA rejects alternate credentials and fallback.
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum McpServerAuth {
+    /// Connect without using stored MCP OAuth credentials or a ChatGPT token.
+    #[serde(rename = "none")]
+    None,
     /// Use stored MCP OAuth credentials when available. Starting an OAuth login
     /// is a separate operation.
     #[default]

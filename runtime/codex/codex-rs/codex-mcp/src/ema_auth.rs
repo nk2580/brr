@@ -191,6 +191,7 @@ impl EmaAuth {
             /*http_headers*/ None,
             /*env_http_headers*/ None,
             /*oauth_config*/ None,
+            /*oauth_resource*/ None,
             OAuthCredentialsStoreMode::Keyring,
             self.config.auth_keyring_backend_kind,
             http_client,

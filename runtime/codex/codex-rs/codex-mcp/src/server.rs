@@ -186,6 +186,14 @@ pub(crate) struct McpServerConnectionIdentity {
 }
 
 impl McpServerConnectionIdentity {
+    pub(crate) fn has_agent_plugin_http_transport(&self) -> bool {
+        self.agent_plugin
+            && matches!(
+                &self.transport,
+                McpServerTransportConfig::StreamableHttp { .. }
+            )
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         server_name: &str,
@@ -210,6 +218,7 @@ impl McpServerConnectionIdentity {
                 .all(|byte| byte == b'\t' || (byte >= b' ' && byte != 0x7f))
         };
         let stored_oauth_url = if runtime_auth_provider.is_none()
+            && !matches!(config.auth, McpServerAuth::None)
             && !matches!(config.auth, McpServerAuth::EmaAuth)
             && (!matches!(config.auth, McpServerAuth::ChatGpt) || config.is_local_environment())
         {

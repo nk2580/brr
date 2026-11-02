@@ -1,11 +1,21 @@
 {
   "bundle": {
-    "macOS": { "entitlements": "Entitlements.plist" },
-    "externalBin": ["binaries/brr-runtime", "binaries/codex-code-mode-host"],
+    "macOS": {
+      "entitlements": "Entitlements.plist"
+    },
+    "externalBin": [
+      "binaries/brr-runtime",
+      "binaries/codex-code-mode-host"
+    ],
     "resources": {
       "../runtime/codex/LICENSE": "licenses/Codex-LICENSE.txt",
       "../runtime/codex/NOTICE": "licenses/Codex-NOTICE.txt",
-      "../runtime/UPSTREAM.md": "licenses/Brr-runtime-upstream.md"
+      "../runtime/UPSTREAM.md": "licenses/Brr-runtime-upstream.md",
+      "../vendor/worktrunk/LICENSE": "licenses/WorkTrunk-LICENSE.txt",
+      "../vendor/WORKTRUNK.md": "licenses/Brr-worktrunk-upstream.md",
+      "licenses/cfworker-LICENSE.md": "licenses/cfworker-LICENSE.md",
+      "licenses/cfworker-THIRD-PARTY-NOTICES.md": "licenses/cfworker-THIRD-PARTY-NOTICES.md",
+      "licenses/mcp-apps-THIRD-PARTY-NOTICES.txt": "licenses/mcp-apps-THIRD-PARTY-NOTICES.txt"
     }
   }
 }

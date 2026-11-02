@@ -1,0 +1,18 @@
+[package]
+name = "brr-agent-core"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+sha2 = "0.10"
+jiff = { version = "0.2.38", features = ["tzdb-bundle-always"] }
+
+[dev-dependencies]
+tempfile = "3"

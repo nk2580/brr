@@ -16,11 +16,15 @@ fn git(root: &Path, args: &[&str]) {
     );
 }
 
-async fn connect(home: &Path, fixture: &Path, wt: &Path) -> Engine {
+async fn connect(home: &Path, fixture: &Path) -> Engine {
     let mut command = Command::new("python3");
     command.arg(fixture).current_dir(home);
     let mut engine = Engine::connect(command, Arc::new(|_| {})).await.unwrap();
-    engine.worktrees = WorktreeManager::with_executable(wt.to_path_buf(), home.to_path_buf());
+    engine.worktrees = WorktreeManager::with_config(
+        home.to_path_buf(),
+        worktrunk::config::UserConfig::default(),
+        home.join("approvals.toml"),
+    );
     engine
 }
 
@@ -47,24 +51,25 @@ async fn project_sessions_persist_their_worktree_and_never_redirect_back_to_the_
     );
     std::fs::write(root.join("other-agent.txt"), "other agent work").unwrap();
 
-    let wt = dir.path().join("wt");
-    std::fs::write(&wt, r#"#!/usr/bin/env python3
-import json,sys,subprocess,pathlib
-root=pathlib.Path(sys.argv[2])
-args=sys.argv[3:]
-if args[:3]==['config','approvals','list']:
-    print(json.dumps({'state':'no_commands'}))
-else:
-    branch=args[args.index('--create')+1]
-    path=root.parent/branch.replace('/','-')
-    subprocess.run(['git','-C',str(root),'worktree','add','-b',branch,str(path),'HEAD'],check=True,stdout=sys.stderr)
-    print(json.dumps({'path':str(path)}))
-"#).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&wt, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    std::fs::create_dir_all(root.join(".config")).unwrap();
+    std::fs::write(
+        root.join(".config/wt.toml"),
+        "[pre-start]\nsetup = \"touch setup-complete.txt\"\n",
+    )
+    .unwrap();
+    git(&root, &["add", ".config/wt.toml"]);
+    git(
+        &root,
+        &[
+            "-c",
+            "user.name=Brr Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-m",
+            "test: setup hook",
+        ],
+    );
     let fixture = dir.path().join("engine.py");
     std::fs::write(
         &fixture,
@@ -95,14 +100,49 @@ for line in sys.stdin:
     )
     .unwrap();
 
-    let engine = connect(&home, &fixture, &wt).await;
+    let engine = connect(&home, &fixture).await;
+    let inspection = engine
+        .request("brr/worktree/inspect", json!({"cwd":root}))
+        .await
+        .unwrap();
+    assert_eq!(
+        inspection["commands"][0]["template"],
+        "touch setup-complete.txt"
+    );
+    assert_eq!(inspection["commands"][0]["approved"], false);
+    let rejected = engine
+        .request(
+            "brr/worktree/approve",
+            json!({"cwd":root,"templates":["unreviewed command"]}),
+        )
+        .await;
+    assert!(rejected.is_err());
+    let blocked = engine.request("thread/start", json!({"cwd":root})).await;
+    assert!(blocked.is_err());
+    assert!(!root.join("setup-complete.txt").exists());
+    engine
+        .request(
+            "brr/worktree/approve",
+            json!({"cwd":root,"templates":["touch setup-complete.txt"]}),
+        )
+        .await
+        .unwrap();
+    let inspection = engine
+        .request("brr/worktree/inspect", json!({"cwd":root}))
+        .await
+        .unwrap();
+    assert_eq!(inspection["commands"][0]["approved"], true);
     let started = engine
         .request("thread/start", json!({"cwd":root,"sandbox":"read-only"}))
         .await
         .unwrap();
     let cwd = started["thread"]["cwd"].as_str().unwrap();
+    assert_eq!(started["thread"]["brr"]["kind"], "baseline");
+    assert_eq!(started["thread"]["brr"]["learningEligible"], true);
     let path = Path::new(cwd);
     assert_ne!(path, root.canonicalize().unwrap());
+    assert!(path.join("setup-complete.txt").exists());
+    assert!(!root.join("setup-complete.txt").exists());
     assert_eq!(
         started["thread"]["worktree"]["projectPath"],
         root.canonicalize().unwrap().to_string_lossy().as_ref()
@@ -120,7 +160,7 @@ for line in sys.stdin:
     assert_ne!(started["thread"]["cwd"], second["thread"]["cwd"]);
     engine.shutdown().await;
 
-    let engine = connect(&home, &fixture, &wt).await;
+    let engine = connect(&home, &fixture).await;
     let listed = engine.request("thread/list", json!({})).await.unwrap();
     assert_eq!(listed["data"][0]["worktree"], started["thread"]["worktree"]);
     let resumed = engine
@@ -169,7 +209,36 @@ for line in sys.stdin:
     assert_eq!(starts[0]["params"]["sandbox"], "read-only");
     assert_eq!(starts[0]["params"]["modelProvider"], "openai");
     assert_eq!(starts[0]["params"]["approvalPolicy"], "on-request");
+    assert_eq!(starts[0]["params"]["config"]["features.memories"], false);
+    assert!(
+        starts[0]["params"]["config"]["features.multi_agent"].is_null(),
+        "Baseline retains its native temporary agents"
+    );
+    let forwarded: Vec<Value> = requests
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let resume = forwarded
+        .iter()
+        .find(|m| m["method"] == "thread/resume")
+        .unwrap();
+    assert_eq!(
+        resume["params"]["config"]["features.memories"], false,
+        "New baseline settings survive a cold host resume"
+    );
+    let turn = forwarded
+        .iter()
+        .find(|m| m["method"] == "turn/start")
+        .unwrap();
+    assert_eq!(
+        turn["params"]["additionalContext"]["brr_source_index"]["kind"],
+        "untrusted"
+    );
     assert!(!requests.contains("must not run"));
+    assert!(
+        !requests.contains("brr/worktree/"),
+        "native setup requests must never reach the inference runtime"
+    );
 }
 
 #[tokio::test]

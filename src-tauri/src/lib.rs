@@ -1,4 +1,9 @@
+mod agent_host;
+mod agent_protocol;
+mod agent_workers;
 mod bridge;
+mod external_url;
+mod mcp_sandbox;
 mod policy;
 mod worktrees;
 
@@ -60,6 +65,38 @@ mod runtime_tests {
             .unwrap_err();
         assert!(error.contains("Sign in with ChatGPT"));
         runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires the source-built Brr runtime; validates its real managed-thread protocol"]
+    async fn owned_runtime_accepts_agent_tools_and_context_without_relaxing_authentication() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = Engine::connect(runtime_command(dir.path()).unwrap(), Arc::new(|_| {}))
+            .await
+            .unwrap();
+        runtime.verify_agent_protocol().await.unwrap();
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "explicit live ChatGPT acceptance; BRR_LIVE_AUTH_PATH supplies an existing managed account"]
+    async fn live_agent_task_writes_verified_output_and_finishes_its_learning_pass() {
+        let Some(auth) = std::env::var_os("BRR_LIVE_AUTH_PATH") else {
+            panic!("BRR_LIVE_AUTH_PATH is required")
+        };
+        let dir = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        std::fs::copy(auth, dir.path().join("auth.json")).unwrap();
+        let runtime = Engine::connect(runtime_command(dir.path()).unwrap(), Arc::new(|_| {}))
+            .await
+            .unwrap();
+        let result = runtime.verify_live_agent_task().await;
+        runtime.shutdown().await;
+        result.unwrap();
     }
 }
 
@@ -155,6 +192,18 @@ async fn engine_request(
 }
 
 #[tauri::command]
+async fn agents_request(
+    runtime: State<'_, Runtime>,
+    method: String,
+    params: Value,
+) -> Result<Value, String> {
+    engine(&runtime)
+        .await?
+        .agents_request(&method, params)
+        .await
+}
+
+#[tauri::command]
 async fn engine_respond(
     runtime: State<'_, Runtime>,
     id: Value,
@@ -196,19 +245,61 @@ async fn chatgpt_login(runtime: State<'_, Runtime>) -> Result<Value, String> {
     Ok(json!({"loginId": login["loginId"]}))
 }
 
+#[tauri::command]
+async fn open_external_url(url: String) -> Result<(), String> {
+    external_url::validate(&url)?;
+    #[cfg(target_os = "macos")]
+    let mut browser = tokio::process::Command::new("open");
+    #[cfg(target_os = "linux")]
+    let mut browser = tokio::process::Command::new("xdg-open");
+    #[cfg(target_os = "windows")]
+    let mut browser = {
+        let mut command = tokio::process::Command::new("rundll32");
+        command.arg("url.dll,FileProtocolHandler");
+        command
+    };
+    let status = browser
+        .arg(&url)
+        .status()
+        .await
+        .map_err(|error| format!("Could not open your browser: {error}"))?;
+    if !status.success() {
+        return Err("Could not open your browser".into());
+    }
+    Ok(())
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(Runtime::default())
+        .manage(mcp_sandbox::SandboxManager::default())
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             engine_connect,
             engine_request,
+            agents_request,
             engine_respond,
-            chatgpt_login
+            chatgpt_login,
+            open_external_url,
+            mcp_sandbox::create_mcp_sandbox,
+            mcp_sandbox::destroy_mcp_sandbox
         ])
         .build(tauri::generate_context!())
         .expect("failed to build Brr")
         .run(|app, event| {
+            #[cfg(target_os = "macos")]
+            if matches!(event, tauri::RunEvent::Reopen { .. }) {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+            }
             if matches!(event, tauri::RunEvent::Exit) {
                 let runtime = app.state::<Runtime>();
                 tauri::async_runtime::block_on(async {

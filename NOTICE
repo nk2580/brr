@@ -9,3 +9,17 @@ runtime.
 
 Brr is an independent project. Mention of OpenAI Codex identifies upstream
 source and does not imply sponsorship, endorsement, or affiliation.
+
+Brr also compiles a source fork of WorkTrunk into its desktop host.
+WorkTrunk is Copyright (c) 2025 Maximilian Roos and is dual-licensed under
+MIT or Apache-2.0. Its upstream license is retained at vendor/worktrunk/LICENSE;
+the pinned source and Brr's maintained changes are recorded in vendor/WORKTRUNK.md.
+
+Brr's MCP form validation includes @cfworker/json-schema (MIT).
+Its upstream license and third-party notices are retained in src-tauri/licenses
+and included in desktop bundles.
+
+Brr's MCP Apps host uses the official @modelcontextprotocol/ext-apps SDK (MIT)
+and Model Context Protocol client/core libraries (Apache-2.0).
+Their licenses and transitive dependency notices are retained in
+src-tauri/licenses/mcp-apps-THIRD-PARTY-NOTICES.txt and included in desktop bundles.

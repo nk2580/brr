@@ -5,11 +5,11 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const rootFiles = new Set([
-  '.gitignore', '.env.example', 'components.json', 'index.html', 'package.json', 'pnpm-lock.yaml',
+  '.gitignore', '.gitmodules', '.env.example', 'components.json', 'index.html', 'package.json', 'pnpm-lock.yaml', 'rust-toolchain.toml',
   'playwright.config.ts', 'tsconfig.json', 'vite.config.ts', 'README.md', 'PRODUCT.md',
   'DESIGN.md', 'LICENSE', 'NOTICE', 'CONTRIBUTING.md', 'GOVERNANCE.md',
 ])
-const includedTrees = new Set(['src', 'src-tauri', 'runtime', 'scripts', 'docs', 'website', 'e2e'])
+const includedTrees = new Set(['src', 'src-tauri', 'runtime', 'vendor', 'scripts', 'docs', 'website', 'e2e'])
 const excludedDirectoryNames = new Set([
   '.git', '.cache', '.openai', '.sites-runtime', '.tools', 'node_modules', 'target', 'dist', 'gen', 'bazel-out',
   'bazel-bin', 'bazel-testlogs', 'bazel-src', 'test-results', 'playwright-report',

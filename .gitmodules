@@ -1,0 +1,4 @@
+[submodule "vendor/worktrunk"]
+	path = vendor/worktrunk
+	url = https://github.com/nk2580/worktrunk.git
+	branch = codex/brr-native

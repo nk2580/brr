@@ -12,6 +12,9 @@ playwright-report/
 runtime/codex/codex-rs/target/
 runtime/codex/brr/policy/target/
 runtime/target/
+runtime/brr/extension-tests/target/
+runtime/brr/agents/target/
+vendor/worktrunk/target/
 src-tauri/binaries/
 /.env*
 !/.env.example
@@ -27,3 +30,7 @@ src-tauri/binaries/
 projects/desktop-agent/evidence/
 projects/desktop-agent/state.json
 projects/desktop-agent/verification.md
+projects/**/evidence/
+projects/**/state.json
+projects/**/verification.md
+website/public/downloads/

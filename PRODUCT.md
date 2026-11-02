@@ -14,7 +14,7 @@ The user explicitly chose the ChatGPT desktop app as the functional and visual r
 
 ## Principles and anti-references
 
-Expose the mode the agent is using and make implementation a deliberate transition from planning. Keep planning distinct from the runtime progress checklist and from workspace access permissions. Prefer ordinary controls and inline review actions. Avoid decorative dashboards, extra navigation, new themes and redundant status panels. Preserve ChatGPT-only inference and the owned runtime boundary.
+Expose the mode the agent is using and make implementation a deliberate transition from planning. Keep planning distinct from the runtime progress checklist and from workspace access permissions. Prefer ordinary controls and inline review actions. The latest desktop reference uses a permanently visible icon rail and a separate collapsible sidebar, with chat to the right. The user specifies exactly Home, Agents and Plugins at the top of the rail, then the user profile avatar and Settings at the bottom. All five have tooltips and remain visible; only the adjacent sidebar collapses through its own control. Match graphite surfaces, compact icon spacing and project/chat hierarchy. Apply configurable colors to the permanent icon rail only, retaining saved preferences and Graphite as the default. The collapsible Home, Agents and Plugins menus keep their neutral dark surfaces. Keep the conversation area quiet and dark. Avoid decorative dashboards and redundant status panels. Preserve ChatGPT-only inference and the owned runtime boundary.
 
 ## Accessibility
 

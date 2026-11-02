@@ -15,7 +15,7 @@ and no dependency on an installed Codex CLI.
 
 ## Build the desktop app
 
-The verified desktop build is macOS. Install Node.js 22+, pnpm 10, stable Rust
+The verified desktop build is macOS. Install Node.js 22+, pnpm 10, Rustup
 and the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/). From
 an extracted Brr source folder:
 
@@ -24,14 +24,18 @@ pnpm install
 pnpm desktop:dev
 ```
 
+For a Git checkout, first run `git submodule update --init --recursive`.
+Brr's root toolchain file pins Rust 1.98.0 for its native WorkTrunk dependency.
+
 The first runtime build downloads and compiles a large Rust workspace and
 checksum-verified V8 artifacts. Choose a local project folder, sign in with
 ChatGPT, select a model available to your account and start a conversation.
 
-New conversations currently use isolated Git worktrees. Install
-[Worktrunk](https://worktrunk.dev/) so `wt` is on PATH, and choose a Git project
-with at least one commit. This requirement also applies to note or writing
-projects. Existing legacy conversations retain their saved project directory.
+New conversations use isolated Git worktrees. [WorkTrunk](https://worktrunk.dev/)
+is compiled into the app from its pinned source submodule; no separate `wt`
+installation is required. Choose a Git project with at least one commit.
+Brr displays project setup hooks for explicit approval before they run.
+Existing legacy conversations retain their saved project directory.
 
 To create a local app bundle with ad-hoc signing:
 
@@ -53,6 +57,29 @@ pnpm install
 
 ## Work with Brr
 
+Open **Agents** to create a persistent helper through an interview. Review its
+proposed `instructions.md` and `soul.md`, then create it. Each agent has separate
+chat sessions, model defaults, tasks, memory, learned skills and a profile you
+can revise through chat. Ordinary **New conversation** chats remain available.
+General agent chats do not require a Git project.
+
+Select an agent in the composer to start a named conversation. An explicit
+`@Agent name` at the start of a message assigns a separate background task
+containing that message. Agent-generated task graphs wait for your review.
+The Tasks tab supports dependencies and recurring cron schedules with an
+explicit timezone. Background defaults are four workers total and two task
+workers per agent; these limits are editable.
+
+New ordinary chats, agent chats and tasks learn from new evidence. The Memory
+tab shows private agent facts and shared user/project knowledge, sources,
+corrections, forgetting and undo. Historical chats are not backfilled. Learned
+skills retain successful tool evidence. Private recall is separated by the
+harness under existing local tool permissions.
+
+Closing the window keeps background work running; **Quit Brr** stops the app.
+Restart reconciles saved work before continuing. Unknown external outcomes
+block for review. No background work runs while Brr is quit.
+
 Choose **Plan**, type `/plan`, or press **Shift+Tab** in the composer to inspect
 a project and refine a proposed plan. Choose **Implement plan** to start work
 in the same conversation. Planning mode and workspace permissions are separate.
@@ -69,10 +96,13 @@ configured services; Brr is not an offline model.
 
 ## Extend and contribute
 
-The runtime includes Skills and MCP support. Skills describe reusable
-workflows; MCP connects tools and context. Setup is currently manual, with no
-in-app extension marketplace. Tool extensions do not change the ChatGPT-only
-inference policy.
+Open **Plugins** from the icon rail to browse marketplaces, install Codex
+plugins, review hooks and configure MCP connections. Brr uses its owned Codex
+runtime for package installation, skills, connectors and MCP. The desktop also
+supports MCP prompts, resources, tools, form and URL requests, and sandboxed
+MCP Apps. Service credentials do not change the ChatGPT-only inference policy.
+See the [plugin and MCP host decision](docs/adr/003-plugin-and-mcp-host.md)
+for supported transports, authentication and remaining limits.
 
 Brr starts as an early, maintainer-led open source project. Read the
 [contribution guide](CONTRIBUTING.md), [governance notes](GOVERNANCE.md),
@@ -89,6 +119,9 @@ pnpm build
 pnpm test:e2e
 cargo test --manifest-path src-tauri/Cargo.toml
 pnpm runtime:test
+pnpm runtime:extensions-test
+pnpm runtime:extensions-smoke
+pnpm runtime:extension-auth-smoke
 pnpm runtime:smoke
 pnpm runtime:helper-smoke
 pnpm native:smoke

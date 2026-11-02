@@ -19,11 +19,10 @@ state and QA evidence, private configuration and credentials, caches, build
 outputs, binaries, and nested Git metadata. It does not fetch upstream source
 or use an installed Codex CLI.
 
-The runtime supports Skills and MCP servers through its inherited configuration
-and runtime capabilities. The desktop app currently has no in-app extension
-marketplace or setup screen; connecting one requires manual runtime
-configuration. These integrations do not change Brr's ChatGPT-only inference
-policy.
+The desktop's Plugins section supports marketplaces, plugin installation and
+MCP configuration through the owned runtime. See the [plugin and MCP host
+decision](adr/003-plugin-and-mcp-host.md) for supported capabilities and limits.
+These integrations do not change Brr's ChatGPT-only inference policy.
 
 Before publishing an archive, review the selected file list and inspect the
 archive contents. The project is early and maintainer-led; see

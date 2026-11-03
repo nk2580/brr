@@ -17,6 +17,12 @@ use codex_history::RetainedContextEvent;
 use codex_history::VerifiedAnswer;
 use codex_history::VerifiedQuestionAnswer;
 use codex_protocol::config_types::ModeKind;
+#[cfg(feature = "brr-runtime")]
+use codex_protocol::items::FunctionCallOutputItem;
+#[cfg(feature = "brr-runtime")]
+use codex_protocol::items::TurnItem;
+#[cfg(feature = "brr-runtime")]
+use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::request_user_input::RequestUserInputArgs;
 use codex_tools::ToolName;
 use codex_tools::ToolSpec;
@@ -80,7 +86,7 @@ impl RequestUserInputHandler {
             .map_err(FunctionCallError::RespondToModel)?;
         let args = RequestUserInputArgs {
             questions: args.questions,
-            is_blocking: mode == ModeKind::Plan,
+            is_blocking: cfg!(feature = "brr-runtime") || mode == ModeKind::Plan,
             auto_resolution_ms: None,
         };
         let questions = args.questions.clone();
@@ -100,6 +106,17 @@ impl RequestUserInputHandler {
                 "failed to serialize {REQUEST_USER_INPUT_TOOL_NAME} response: {err}"
             ))
         })?;
+        #[cfg(feature = "brr-runtime")]
+        {
+            let item = TurnItem::FunctionCallOutput(FunctionCallOutputItem {
+                id: call_id.clone(),
+                name: REQUEST_USER_INPUT_TOOL_NAME.to_string(),
+                namespace: None,
+                output: FunctionCallOutputBody::Text(content.clone()),
+            });
+            session.emit_turn_item_started(turn.as_ref(), &item).await;
+            session.emit_turn_item_completed(turn.as_ref(), item).await;
+        }
         // Persist answers even while an older checkpoint needs compatibility review.
         if turn.config.features.enabled(Feature::GuardianApproval) {
             let user_input = questions

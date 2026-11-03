@@ -7,16 +7,20 @@ export interface Account { type: 'chatgpt'; email: string | null; planType: stri
 export interface Model { id: string; model: string; displayName: string; isDefault: boolean; supportedReasoningEfforts: {reasoningEffort: string; description: string}[]; defaultReasoningEffort: string }
 export interface Turn { id: string; status?: string; items?: unknown[] }
 export interface Worktree { projectPath: string; path: string; branch: string; cwd: string }
-export interface WorktreeSetupCommand { phase: string; name?: string | null; template: string; approved: boolean }
+export interface WorktreeSetupCommand { cwd?: string; phase: string; name?: string | null; template: string; approved: boolean }
 export class WorktreeSetupRequired extends Error {
   readonly kind = 'worktreeSetupRequired'
-  constructor(readonly cwd: string, readonly commands: WorktreeSetupCommand[]) {
+  constructor(readonly projectId: string, readonly commands: WorktreeSetupCommand[]) {
     super('Worktree setup approval required')
     this.name = 'WorktreeSetupRequired'
   }
 }
-export interface Thread { id: string; name?: string | null; preview: string; cwd: string; updatedAt: number; worktree?: Worktree; historyMode?: 'legacy' | 'paginated'; collaborationMode?: { mode?: string } | null; turns?: Turn[] }
+export interface SessionWorkspace { cwd: string; roots: string[]; folders: {source: string; path: string}[]; worktrees: Worktree[]; scopeProjectId: string | null; projectRevision: number | null }
+export interface Thread { projectId?: string | null; workspace?: SessionWorkspace; id: string; name?: string | null; preview: string; cwd: string; updatedAt: number; worktree?: Worktree; historyMode?: 'legacy' | 'paginated'; collaborationMode?: { mode?: string } | null; turns?: Turn[] }
 export interface Connection { account: Account | null; models: Model[]; threads: Thread[] }
+export interface ProjectInput { name: string; folders: string[]; primaryFolder: string | null; model: string | null; effort: string | null; permission: 'read-only' | 'workspace-write' | null }
+export interface ProjectRecord extends ProjectInput { id: string; revision: number; hidden: boolean }
+export interface ProjectArchiveResult { archivedIds: string[]; skipped: {threadId: string; reason: string}[]; failed: {threadId: string; error: string}[] }
 
 export const isDesktop = () => '__TAURI_INTERNALS__' in window
 const rpc = <T = unknown>(method: string, params: Record<string, unknown> = {}) => invoke<T>('engine_request', { method, params })
@@ -49,12 +53,24 @@ export const client = {
     } while (cursor)
     return all
   },
-  chooseWorkspace: () => open({directory: true, multiple: false, title: 'Choose a project folder'}),
-  async start(cwd: string, model: string, readOnly: boolean): Promise<{thread: Thread}> {
-    const inspection = await rpc<{commands: WorktreeSetupCommand[]}>('brr/worktree/inspect', {cwd})
+  chooseWorkspace: () => open({directory: true, multiple: false, title: 'Choose a folder'}),
+  chooseFolders: async (): Promise<string[] | null> => {
+    const result = await open({directory: true, multiple: true, title: 'Add project folders'})
+    return result ? (Array.isArray(result) ? result : [result]) : null
+  },
+  revealProject: (path: string) => invoke<void>('reveal_project_folder', {path}),
+  projects: () => invoke<{data: ProjectRecord[]}>('list_projects'),
+  createProject: (project: ProjectInput) => invoke<ProjectRecord>('create_project', {project}),
+  moveChat: (threadId: string, projectId: string | null) => invoke<void>('move_chat_to_project', {threadId, projectId}),
+  saveProject: (project: ProjectRecord) => invoke<ProjectRecord>('save_project', {project}),
+  archiveProject: (projectId: string) => invoke<ProjectArchiveResult>('archive_project_chats', {projectId}),
+  deleteProject: (projectId: string) => invoke<void>('delete_project', {projectId}),
+  inspectProject: (projectId: string | null) => rpc<{commands: WorktreeSetupCommand[]}>('brr/project/inspect', {projectId}),
+  async start(projectId: string | null, model: string, readOnly: boolean): Promise<{thread: Thread}> {
+    const inspection = await this.inspectProject(projectId)
     const unapproved = inspection.commands.filter(command => !command.approved)
-    if (unapproved.length) throw new WorktreeSetupRequired(cwd, unapproved)
-    return rpc<{thread: Thread}>('thread/start', {cwd, model, modelProvider: 'openai', approvalPolicy: 'on-request', sandbox: readOnly ? 'read-only' : 'workspace-write'})
+    if (unapproved.length) throw new WorktreeSetupRequired(projectId ?? '', unapproved)
+    return rpc<{thread: Thread}>('thread/start', {projectId, model, modelProvider: 'openai', approvalPolicy: 'on-request', sandbox: readOnly ? 'read-only' : 'workspace-write'})
   },
   approveWorktree: (cwd: string, templates: string[]) => rpc('brr/worktree/approve', {cwd, templates}),
   async resume(threadId: string, readOnly?: boolean): Promise<{thread: Thread}> {

@@ -4,9 +4,11 @@ use codex_features::Features;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::request_user_input::RequestUserInputQuestion;
 use codex_protocol::request_user_input::RequestUserInputQuestionOption;
+#[cfg(not(feature = "brr-runtime"))]
 use codex_tools::JsonSchema;
 use codex_tools::request_user_input_available_modes;
 use pretty_assertions::assert_eq;
+#[cfg(not(feature = "brr-runtime"))]
 use std::collections::BTreeMap;
 
 fn default_mode_enabled_available_modes() -> Vec<ModeKind> {
@@ -20,6 +22,7 @@ fn default_available_modes() -> Vec<ModeKind> {
 }
 
 #[test]
+#[cfg(not(feature = "brr-runtime"))]
 fn request_user_input_tool_includes_questions_schema() {
     assert_eq!(
         create_request_user_input_tool("Ask the user to choose.".to_string()),
@@ -136,6 +139,7 @@ fn normalize_request_user_input_tool_args_sets_other_on_every_question() {
 }
 
 #[test]
+#[cfg(not(feature = "brr-runtime"))]
 fn normalize_request_user_input_tool_args_rejects_missing_options() {
     let args = RequestUserInputToolArgs {
         questions: vec![RequestUserInputQuestion {
@@ -152,6 +156,68 @@ fn normalize_request_user_input_tool_args_rejects_missing_options() {
         normalize_request_user_input_tool_args(args),
         Err("request_user_input requires non-empty options for every question".to_string())
     );
+}
+
+#[cfg(feature = "brr-runtime")]
+#[test]
+fn brr_normalizes_text_only_questions_and_rejects_duplicate_ids() {
+    let text_only = RequestUserInputToolArgs {
+        questions: vec![RequestUserInputQuestion {
+            id: "project_name".to_string(),
+            header: "Name".to_string(),
+            question: "What should the project be called?".to_string(),
+            is_other: false,
+            is_secret: false,
+            options: None,
+        }],
+    };
+    let normalized = normalize_request_user_input_tool_args(text_only.clone());
+    let expected = RequestUserInputToolArgs {
+        questions: vec![RequestUserInputQuestion {
+            is_other: true,
+            ..text_only.questions[0].clone()
+        }],
+    };
+    assert_eq!(normalized, Ok(expected));
+
+    let duplicated = RequestUserInputToolArgs {
+        questions: vec![
+            text_only.questions[0].clone(),
+            text_only.questions[0].clone(),
+        ],
+    };
+    assert_eq!(
+        normalize_request_user_input_tool_args(duplicated),
+        Err("question ids must be unique and non-empty".to_string())
+    );
+}
+
+#[cfg(feature = "brr-runtime")]
+#[test]
+fn brr_question_schema_allows_optional_options() {
+    let ToolSpec::Function(tool) =
+        create_request_user_input_tool("Ask the user to choose.".to_string())
+    else {
+        panic!("expected function tool spec");
+    };
+    let questions = tool
+        .parameters
+        .properties
+        .as_ref()
+        .and_then(|properties| properties.get("questions"))
+        .expect("questions schema");
+    let question = questions.items.as_ref().expect("question item schema");
+    let required = question
+        .required
+        .as_ref()
+        .expect("question required fields");
+    assert!(!required.iter().any(|field| field == "options"));
+    let options = question
+        .properties
+        .as_ref()
+        .and_then(|properties| properties.get("options"))
+        .expect("options property schema");
+    assert_eq!(options.min_items, Some(1));
 }
 
 #[test]

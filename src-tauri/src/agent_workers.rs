@@ -1,9 +1,12 @@
 use crate::agent_host::AgentHost;
-use brr_agent_core::{MemoryAccess, SessionBinding, Task, TaskRun};
+use brr_agent_core::{
+    MemoryAccess, QuestionRequest, SessionBinding, Task, TaskRun, WorkspacePermission,
+};
 use serde_json::{json, Value};
 use sqlx::SqlitePool;
 use std::{
     collections::{HashMap, HashSet},
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
@@ -11,7 +14,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
-    sync::{mpsc, watch},
+    sync::{mpsc, watch, Notify},
     task::{JoinHandle, JoinSet},
 };
 
@@ -32,9 +35,10 @@ struct WorkerInner {
     handles: Mutex<Vec<JoinHandle<()>>>,
     active_runs: Mutex<HashSet<String>>,
     approvals: Mutex<HashMap<String, ApprovalLease>>,
-    workspace_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
-    workspace_guards: Mutex<HashMap<String, tokio::sync::OwnedMutexGuard<()>>>,
-    workspace_reservations: Mutex<HashMap<String, String>>,
+    workspace_guards: Mutex<HashMap<String, Vec<String>>>,
+    workspace_changed: Notify,
+    workspace_reservations: Mutex<HashMap<String, Vec<String>>>,
+    approved_ticket_projects: Mutex<HashMap<String, crate::tickets::ApprovedTicketProject>>,
     task_control_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     learning_retry_after: Mutex<i64>,
     checked_waiting_runs: Mutex<HashSet<String>>,
@@ -66,9 +70,10 @@ impl WorkerState {
                 handles: Mutex::new(Vec::new()),
                 active_runs: Mutex::new(HashSet::new()),
                 approvals: Mutex::new(HashMap::new()),
-                workspace_locks: Mutex::new(HashMap::new()),
                 workspace_guards: Mutex::new(HashMap::new()),
+                workspace_changed: Notify::new(),
                 workspace_reservations: Mutex::new(HashMap::new()),
+                approved_ticket_projects: Mutex::new(HashMap::new()),
                 task_control_locks: Mutex::new(HashMap::new()),
                 learning_retry_after: Mutex::new(0),
                 checked_waiting_runs: Mutex::new(HashSet::new()),
@@ -107,10 +112,31 @@ impl WorkerState {
     fn release_workspace(&self, run_id: &str) {
         self.inner.workspace_guards.lock().unwrap().remove(run_id);
         self.inner
+            .approved_ticket_projects
+            .lock()
+            .unwrap()
+            .remove(run_id);
+        self.inner
             .workspace_reservations
             .lock()
             .unwrap()
             .remove(run_id);
+        self.inner.workspace_changed.notify_waiters();
+    }
+
+    pub(crate) fn forget_run(&self, run_id: &str) {
+        self.release_workspace(run_id);
+        self.inner.active_runs.lock().unwrap().remove(run_id);
+        self.inner
+            .checked_waiting_runs
+            .lock()
+            .unwrap()
+            .remove(run_id);
+        self.inner
+            .approvals
+            .lock()
+            .unwrap()
+            .retain(|_, approval| approval.run_id != run_id);
     }
 
     fn excluded_workspaces(&self) -> Vec<String> {
@@ -119,7 +145,7 @@ impl WorkerState {
             .lock()
             .unwrap()
             .values()
-            .cloned()
+            .flat_map(|roots| roots.iter().cloned())
             .collect::<HashSet<_>>()
             .into_iter()
             .collect()
@@ -129,14 +155,21 @@ impl WorkerState {
         let Some(cwd) = task.cwd.as_deref() else {
             return Ok(());
         };
-        if self
-            .inner
-            .workspace_reservations
-            .lock()
-            .unwrap()
-            .get(run_id)
-            .is_some_and(|reserved| reserved == cwd)
+        let cwd_owned = cwd.to_owned();
+        if tokio::task::spawn_blocking(move || {
+            worktrunk::git::Repository::at_fresh(&cwd_owned).is_ok()
+        })
+        .await
+        .map_err(|error| error.to_string())?
         {
+            return Ok(());
+        }
+        self.reserve_workspace_roots(run_id, vec![cwd.to_owned()])
+    }
+
+    fn reserve_workspace_roots(&self, run_id: &str, roots: Vec<String>) -> Result<(), String> {
+        let roots = canonical_workspace_roots(roots)?;
+        if roots.is_empty() {
             return Ok(());
         }
         if self
@@ -148,23 +181,11 @@ impl WorkerState {
         {
             return Ok(());
         }
-        let Some(cwd) = task.cwd.as_deref() else {
-            return Ok(());
-        };
-        let cwd_owned = cwd.to_owned();
-        let is_git = tokio::task::spawn_blocking(move || {
-            worktrunk::git::Repository::at_fresh(&cwd_owned).is_ok()
-        })
-        .await
-        .map_err(|error| error.to_string())?;
-        if is_git {
-            return Ok(());
-        }
         self.inner
             .workspace_reservations
             .lock()
             .unwrap()
-            .insert(run_id.to_owned(), cwd.to_owned());
+            .insert(run_id.to_owned(), roots);
         Ok(())
     }
 
@@ -178,34 +199,122 @@ impl WorkerState {
         {
             return Ok(());
         }
-        let Some(cwd) = task.cwd.as_deref() else {
-            return Ok(());
-        };
         self.reserve_workspace(run_id, task).await?;
-        let is_reserved = self
+        let reservations = self
             .inner
             .workspace_reservations
             .lock()
             .unwrap()
             .get(run_id)
-            .is_some_and(|reserved| reserved == cwd);
-        if !is_reserved {
+            .cloned()
+            .unwrap_or_default();
+        if reservations.is_empty() {
             return Ok(());
         }
-        let lock = {
-            let mut locks = self.inner.workspace_locks.lock().unwrap();
-            locks
-                .entry(cwd.to_owned())
-                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-                .clone()
+        self.acquire_reserved_roots(run_id, reservations).await
+    }
+
+    async fn reserve_task_workspace(
+        &self,
+        host: &AgentHost,
+        run_id: &str,
+        task: &Task,
+        thread_id: Option<&str>,
+    ) -> Result<(), String> {
+        let approved = if thread_id.is_none() {
+            match crate::tickets::approved_ticket_project(host, task).await {
+                Ok(approved) => approved,
+                Err(error) => {
+                    if let Ok(run) = host.store.get_run(run_id).await {
+                        block_after_runtime_error(host, self, &run, &error).await;
+                    }
+                    return Err(error);
+                }
+            }
+        } else {
+            None
         };
-        let guard = lock.lock_owned().await;
-        self.inner
+        let roots = if let Some(approved) = approved.as_ref() {
+            project_shared_folders(&approved.workspace_project).await?
+        } else {
+            shared_task_folders(host, task, thread_id).await?
+        };
+        self.reserve_workspace_roots(run_id, roots)?;
+        if let Some(approved) = approved {
+            self.inner
+                .approved_ticket_projects
+                .lock()
+                .unwrap()
+                .insert(run_id.to_owned(), approved);
+        }
+        Ok(())
+    }
+
+    async fn acquire_task_workspace(
+        &self,
+        host: &AgentHost,
+        run_id: &str,
+        task: &Task,
+        thread_id: Option<&str>,
+    ) -> Result<(), String> {
+        if self
+            .inner
             .workspace_guards
             .lock()
             .unwrap()
-            .insert(run_id.to_owned(), guard);
-        Ok(())
+            .contains_key(run_id)
+        {
+            return Ok(());
+        }
+        let approved = self
+            .inner
+            .approved_ticket_projects
+            .lock()
+            .unwrap()
+            .get(run_id)
+            .cloned();
+        let roots = if let Some(approved) = approved {
+            project_shared_folders(&approved.workspace_project).await?
+        } else {
+            shared_task_folders(host, task, thread_id).await?
+        };
+        self.reserve_workspace_roots(run_id, roots.clone())?;
+        self.acquire_reserved_roots(run_id, roots).await
+    }
+
+    async fn acquire_reserved_roots(&self, run_id: &str, roots: Vec<String>) -> Result<(), String> {
+        if self
+            .inner
+            .workspace_guards
+            .lock()
+            .unwrap()
+            .contains_key(run_id)
+        {
+            return Ok(());
+        }
+        let roots = canonical_workspace_roots(roots)?;
+        if roots.is_empty() {
+            return Ok(());
+        }
+        loop {
+            let notified = self.inner.workspace_changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            {
+                let mut active = self.inner.workspace_guards.lock().unwrap();
+                if active.contains_key(run_id) {
+                    return Ok(());
+                }
+                let conflict = active
+                    .iter()
+                    .any(|(owner, held)| owner != run_id && roots_overlap_any(&roots, held));
+                if !conflict {
+                    active.insert(run_id.to_owned(), roots.clone());
+                    return Ok(());
+                }
+            }
+            notified.await;
+        }
     }
 
     pub(crate) async fn task_control_guard(
@@ -323,11 +432,219 @@ impl AgentHost {
             .unwrap_or_else(|| Ok(Vec::new()))
     }
 
+    /// Returns the current task run for a durable question after checking its immutable bindings.
+    /// The caller must hold this task's control guard.
+    pub(crate) async fn activate_question_run(
+        &self,
+        question: &QuestionRequest,
+    ) -> Result<Option<TaskRun>, String> {
+        let task_id = question
+            .task_id
+            .as_deref()
+            .ok_or("question is not bound to a task")?;
+        let run_id = question
+            .run_id
+            .as_deref()
+            .ok_or("question is not bound to a task run")?;
+        let task = self.store.get_task(task_id).await?;
+        let mut run = self.store.get_run(run_id).await?;
+        let binding = self.store.session_binding(&question.thread_id).await?;
+        if !question_run_binding_matches(question, &task, &run, &binding) {
+            return Err("question does not match the immutable task run and thread binding".into());
+        }
+        if run.state == "running" {
+            self.workers
+                .reserve_task_workspace(self, &run.id, &task, run.thread_id.as_deref())
+                .await?;
+            self.workers
+                .acquire_task_workspace(self, &run.id, &task, run.thread_id.as_deref())
+                .await?;
+            self.workers
+                .inner
+                .active_runs
+                .lock()
+                .unwrap()
+                .insert(run.id.clone());
+            return Ok(Some(run));
+        }
+        if run.state != "waiting_input" || task.status != "waiting_input" {
+            return Ok(None);
+        }
+        let settings = self.store.get_task_settings().await?;
+        let running: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM task_runs WHERE state='running'")
+                .fetch_one(self.store.pool())
+                .await
+                .map_err(|error| error.to_string())?;
+        let learning_running: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM agent_learning_jobs WHERE state IN ('running','completion_proposed'))",
+        )
+        .fetch_one(self.store.pool())
+        .await
+        .map_err(|error| error.to_string())?;
+        let capacity = (settings.max_background as i64).saturating_sub(i64::from(learning_running));
+        if running >= capacity {
+            return Ok(None);
+        }
+        run = match self
+            .store
+            .resume_run(&task.id, &run.id, &run.lease_token, WORKER_ID)
+            .await
+        {
+            Ok(run) => run,
+            Err(error) if error.contains("capacity is full") => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        self.workers
+            .reserve_task_workspace(self, &run.id, &task, run.thread_id.as_deref())
+            .await?;
+        self.workers
+            .acquire_task_workspace(self, &run.id, &task, run.thread_id.as_deref())
+            .await?;
+        self.workers
+            .inner
+            .checked_waiting_runs
+            .lock()
+            .unwrap()
+            .remove(&run.id);
+        self.workers
+            .inner
+            .active_runs
+            .lock()
+            .unwrap()
+            .insert(run.id.clone());
+        Ok(Some(run))
+    }
+
+    /// Attaches a host-dispatched answer follow-up to the existing task run.
+    pub(crate) async fn attach_question_turn(
+        &self,
+        question: &QuestionRequest,
+        run: &TaskRun,
+        turn_id: &str,
+    ) -> Result<(), String> {
+        let task_id = question
+            .task_id
+            .as_deref()
+            .ok_or("question is not bound to a task")?;
+        if question.run_id.as_deref() != Some(run.id.as_str())
+            || run.task_id != task_id
+            || run.thread_id.as_deref() != Some(question.thread_id.as_str())
+            || turn_id.trim().is_empty()
+            || question
+                .client_message_id
+                .as_deref()
+                .is_none_or(str::is_empty)
+        {
+            return Err("question answer does not match the immutable task run binding".into());
+        }
+        let current = self.store.get_run(&run.id).await?;
+        if current.state != "running"
+            || current.lease_token != run.lease_token
+            || current.thread_id.as_deref() != Some(question.thread_id.as_str())
+        {
+            return Err("question answer belongs to a stale task run lease".into());
+        }
+        let attached = self
+            .store
+            .attach_continuation(
+                task_id,
+                &run.id,
+                &question.thread_id,
+                turn_id,
+                &run.lease_token,
+            )
+            .await?;
+        persist_submission_turn(self, &run.id, turn_id).await?;
+        record_turn(self, &attached, turn_id, "inProgress", false, false).await?;
+        self.changed();
+        Ok(())
+    }
+
+    async fn wait_for_question_input(&self, event: &Value) -> Result<(), String> {
+        let params = &event["params"];
+        let thread_id = params["threadId"]
+            .as_str()
+            .ok_or("question request has no thread id")?;
+        let turn_id = params["turnId"]
+            .as_str()
+            .ok_or("question request has no turn id")?;
+        let item_id = params["itemId"]
+            .as_str()
+            .ok_or("question request has no item id")?;
+        let question = self
+            .store
+            .list_questions(Some(thread_id), false)
+            .await?
+            .into_iter()
+            .find(|question| {
+                question.item_id == item_id
+                    && question.turn_id == turn_id
+                    && question.kind == "blocking"
+            });
+        let Some(question) = question else {
+            return Ok(());
+        };
+        if question.resolution != "pending" {
+            return Ok(());
+        }
+        let (Some(task_id), Some(run_id)) =
+            (question.task_id.as_deref(), question.run_id.as_deref())
+        else {
+            return Ok(());
+        };
+        let _control = self.workers.task_control_guard(task_id).await;
+        let question = self.store.get_question(&question.id).await?;
+        if question.resolution != "pending" {
+            return Ok(());
+        }
+        let mut run = self.store.get_run(run_id).await?;
+        if run.task_id != task_id || run.thread_id.as_deref() != Some(thread_id) {
+            return Err("blocking question no longer matches its task run thread".into());
+        }
+        if run.state == "waiting_input" {
+            self.workers
+                .inner
+                .active_runs
+                .lock()
+                .unwrap()
+                .remove(run_id);
+            return Ok(());
+        }
+        if run.state != "running"
+            || run
+                .turn_id
+                .as_deref()
+                .is_some_and(|attached| attached != turn_id)
+        {
+            return Ok(());
+        }
+        if run.turn_id.is_none() {
+            run = self
+                .store
+                .attach_continuation(task_id, run_id, thread_id, turn_id, &run.lease_token)
+                .await?;
+            record_turn(self, &run, turn_id, "inProgress", false, false).await?;
+        }
+        self.store
+            .wait_for_input(task_id, run_id, &run.lease_token)
+            .await?;
+        self.workers
+            .inner
+            .active_runs
+            .lock()
+            .unwrap()
+            .remove(run_id);
+        // Keep the workspace reservation and lock until the answer continuation ends.
+        self.changed();
+        Ok(())
+    }
+
     pub(crate) fn start(self: &Arc<Self>) {
         self.workers.start(Arc::downgrade(self));
     }
 
-    pub(crate) fn notify(self: &Arc<Self>, event: Value) {
+    pub(crate) fn notify(&self, event: Value) {
         self.workers.notify(event);
     }
 
@@ -398,7 +715,9 @@ impl AgentHost {
             .resume_run(&lease.task_id, &lease.run_id, &lease.lease_token, WORKER_ID)
             .await?;
         let task = self.store.get_task(&run.task_id).await?;
-        self.workers.acquire_workspace(&run.id, &task).await?;
+        self.workers
+            .acquire_task_workspace(self, &run.id, &task, run.thread_id.as_deref())
+            .await?;
         self.workers
             .inner
             .approvals
@@ -566,11 +885,20 @@ async fn worker_loop(
         }
         if startup {
             startup = false;
+            if let Err(error) = host.reconcile_questions().await {
+                (host.events)(json!({"method":"brr/worker/error","params":{"message":error}}));
+            }
+            if let Err(error) = host.poll_question_deliveries(&mut tasks).await {
+                (host.events)(json!({"method":"brr/worker/error","params":{"message":error}}));
+            }
             if let Err(error) = recover_workers(&host, &workers, &mut tasks).await {
                 (host.events)(json!({"method":"brr/worker/error","params":{"message":error}}));
             }
         }
         if let Err(error) = host.store.tick_workflows(epoch_seconds()).await {
+            (host.events)(json!({"method":"brr/worker/error","params":{"message":error}}));
+        }
+        if let Err(error) = host.poll_question_deliveries(&mut tasks).await {
             (host.events)(json!({"method":"brr/worker/error","params":{"message":error}}));
         }
         if let Err(error) = poll_tasks(&host, &workers, &mut tasks).await {
@@ -584,11 +912,16 @@ async fn recover_workers(
     workers: &WorkerState,
     tasks: &mut JoinSet<()>,
 ) -> Result<(), String> {
+    recover_question_runs(host, workers).await?;
     recover_waiting_runs(host, workers, tasks).await?;
     let unresolved = host.store.unresolved_runs().await?;
-    for run in unresolved.into_iter().filter(|run| run.state == "running") {
+    for run in unresolved.into_iter().filter(|run| {
+        run.state == "running" && !workers.inner.active_runs.lock().unwrap().contains(&run.id)
+    }) {
         let task = host.store.get_task(&run.task_id).await?;
-        workers.reserve_workspace(&run.id, &task).await?;
+        workers
+            .reserve_task_workspace(host, &run.id, &task, run.thread_id.as_deref())
+            .await?;
         if !mark_active(workers, &run.id) {
             continue;
         }
@@ -604,6 +937,169 @@ async fn recover_workers(
     }
     recover_learning(host, workers).await?;
     Ok(())
+}
+
+/// Reconciles runs owned by durable questions without starting a generic continuation.
+async fn recover_question_runs(
+    host: &Arc<AgentHost>,
+    workers: &WorkerState,
+) -> Result<HashSet<String>, String> {
+    let requests = host.store.list_questions(None, true).await?;
+    let mut by_run = HashMap::<String, Vec<QuestionRequest>>::new();
+    for request in requests {
+        if let Some(run_id) = request.run_id.as_ref() {
+            by_run.entry(run_id.clone()).or_default().push(request);
+        }
+    }
+    let mut protected = HashSet::new();
+    for run in host.store.unresolved_runs().await? {
+        let Some(questions) = by_run.get(&run.id) else {
+            continue;
+        };
+        if !host.store.pending_run_questions(&run.id).await? {
+            continue;
+        }
+        protected.insert(run.id.clone());
+        if matches!(run.state.as_str(), "waiting_input" | "waiting_approval") {
+            let _control = workers.task_control_guard(&run.task_id).await;
+            // Delivery may have resumed this run while recovery waited for the task guard.
+            let current = host.store.get_run(&run.id).await?;
+            if !matches!(current.state.as_str(), "waiting_input" | "waiting_approval") {
+                continue;
+            }
+            let task = host.store.get_task(&current.task_id).await?;
+            workers
+                .reserve_task_workspace(host, &run.id, &task, current.thread_id.as_deref())
+                .await?;
+            workers
+                .acquire_task_workspace(host, &run.id, &task, current.thread_id.as_deref())
+                .await?;
+            workers.inner.active_runs.lock().unwrap().remove(&run.id);
+            continue;
+        }
+        if run.state != "running" {
+            continue;
+        }
+        let control = workers.task_control_guard(&run.task_id).await;
+        // Answer activation may have resumed or claimed this run while recovery waited.
+        let current = host.store.get_run(&run.id).await?;
+        if current.state != "running"
+            || workers.inner.active_runs.lock().unwrap().contains(&run.id)
+            || !host.store.pending_run_questions(&run.id).await?
+            || !mark_active(workers, &run.id)
+        {
+            continue;
+        }
+        let result = reconcile_question_run(host, workers, &current, questions).await;
+        drop(control);
+        if let Err(error) = result {
+            workers.inner.active_runs.lock().unwrap().remove(&run.id);
+            block_after_runtime_error(host, workers, &current, &error).await;
+        }
+    }
+    Ok(protected)
+}
+
+async fn reconcile_question_run(
+    host: &AgentHost,
+    workers: &WorkerState,
+    run: &TaskRun,
+    questions: &[QuestionRequest],
+) -> Result<(), String> {
+    let task = host.store.get_task(&run.task_id).await?;
+    workers
+        .reserve_task_workspace(host, &run.id, &task, run.thread_id.as_deref())
+        .await?;
+    workers
+        .acquire_task_workspace(host, &run.id, &task, run.thread_id.as_deref())
+        .await?;
+    let Some(thread_id) = run.thread_id.as_deref() else {
+        return Err("question-bound task run has no saved runtime thread".into());
+    };
+    host.require_account().await?;
+    host.rpc
+        .call(
+            "thread/resume",
+            json!({
+                "threadId":thread_id,
+                "excludeTurns":true,
+                "model":task.model,
+                "modelProvider":"openai",
+                "developerInstructions":crate::agent_protocol::instructions("task"),
+                "config":crate::agent_protocol::thread_config("task")
+            }),
+        )
+        .await?;
+    let turns = thread_turns(host, thread_id).await?;
+    let source_turn_id = run.turn_id.as_deref().or_else(|| {
+        questions
+            .iter()
+            .max_by_key(|question| question.created_at)
+            .map(|question| question.turn_id.as_str())
+    });
+    let Some(source_turn_id) = source_turn_id else {
+        return Err("question-bound task run has no source turn".into());
+    };
+    let Some(source) = turns
+        .iter()
+        .find(|turn| turn["id"].as_str() == Some(source_turn_id))
+    else {
+        return Err("the question source turn is absent from runtime history; automatic continuation is unsafe".into());
+    };
+    let turn_status = source["status"].as_str().unwrap_or("unknown");
+    let turn_id = source["id"]
+        .as_str()
+        .ok_or("question source turn has no runtime id")?;
+    if run.turn_id.is_none() {
+        let attached = host
+            .store
+            .attach_continuation(&task.id, &run.id, thread_id, turn_id, &run.lease_token)
+            .await?;
+        record_turn(
+            host,
+            &attached,
+            turn_id,
+            turn_status,
+            has_unknown_effects(source),
+            false,
+        )
+        .await?;
+    }
+    if matches!(turn_status, "inProgress" | "in_progress") {
+        return Ok(());
+    }
+    let unknown = has_unknown_effects(source);
+    record_turn(host, run, turn_id, turn_status, unknown, false).await?;
+    match question_turn_action(true, turn_status, unknown) {
+        QuestionTurnAction::Continue => Ok(()),
+        QuestionTurnAction::BlockUnknown => {
+            host.store
+                .block_run(
+                    &task.id,
+                    &run.id,
+                    &run.lease_token,
+                    "The question source turn has an unresolved external effect or unknown status. Review it before continuing.",
+                    true,
+                )
+                .await?;
+            mark_turn_processed(host, &run.id, turn_id).await?;
+            workers_release(host, workers, &run.id, &run.lease_token).await;
+            host.changed();
+            Ok(())
+        }
+        QuestionTurnAction::WaitForInput => {
+            if host.store.pending_run_questions(&run.id).await? {
+                host.store
+                    .wait_for_input(&task.id, &run.id, &run.lease_token)
+                    .await?;
+                mark_turn_processed(host, &run.id, turn_id).await?;
+                workers.inner.active_runs.lock().unwrap().remove(&run.id);
+                // Keep workspace reservation and lock while the user's answer is pending.
+                host.changed();
+            }
+            Ok(())
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -626,6 +1122,9 @@ async fn recover_waiting_runs(
         .filter(|run| run.state == "waiting_approval")
         .collect::<Vec<_>>();
     for run in waiting {
+        if host.store.pending_run_questions(&run.id).await? {
+            continue;
+        }
         if workers
             .inner
             .checked_waiting_runs
@@ -686,8 +1185,12 @@ async fn reconcile_waiting_run(
     run: &TaskRun,
 ) -> Result<Option<TaskRun>, String> {
     let task = host.store.get_task(&run.task_id).await?;
-    workers.reserve_workspace(&run.id, &task).await?;
-    workers.acquire_workspace(&run.id, &task).await?;
+    workers
+        .reserve_task_workspace(host, &run.id, &task, run.thread_id.as_deref())
+        .await?;
+    workers
+        .acquire_task_workspace(host, &run.id, &task, run.thread_id.as_deref())
+        .await?;
     let action = if let Some(thread_id) = run.thread_id.as_deref() {
         host.require_account().await?;
         host.rpc
@@ -759,6 +1262,7 @@ async fn poll_tasks(
     tasks: &mut JoinSet<()>,
 ) -> Result<(), String> {
     recover_waiting_runs(host, workers, tasks).await?;
+    let question_runs = recover_question_runs(host, workers).await?;
     let unresolved = host.store.unresolved_runs().await?;
     let mut active = unresolved
         .iter()
@@ -772,9 +1276,14 @@ async fn poll_tasks(
         .unwrap()
         .retain(|run_id| active.remove(run_id));
 
-    for run in unresolved.into_iter().filter(|run| run.state == "running") {
+    for run in unresolved
+        .into_iter()
+        .filter(|run| run.state == "running" && !question_runs.contains(&run.id))
+    {
         let task = host.store.get_task(&run.task_id).await?;
-        workers.reserve_workspace(&run.id, &task).await?;
+        workers
+            .reserve_task_workspace(host, &run.id, &task, run.thread_id.as_deref())
+            .await?;
         if mark_active(workers, &run.id) {
             let host = Arc::downgrade(host);
             let workers = workers.clone();
@@ -815,7 +1324,19 @@ async fn poll_tasks(
             break;
         };
         let claimed_task = host.store.get_task(&run.task_id).await?;
-        workers.reserve_workspace(&run.id, &claimed_task).await?;
+        workers
+            .reserve_task_workspace(host, &run.id, &claimed_task, run.thread_id.as_deref())
+            .await?;
+        if host.store.pending_run_questions(&run.id).await? {
+            workers
+                .acquire_task_workspace(host, &run.id, &claimed_task, run.thread_id.as_deref())
+                .await?;
+            host.store
+                .wait_for_input(&run.task_id, &run.id, &run.lease_token)
+                .await?;
+            host.changed();
+            continue;
+        }
         if !mark_active(workers, &run.id) {
             continue;
         }
@@ -837,6 +1358,104 @@ async fn poll_tasks(
     Ok(())
 }
 
+async fn shared_task_folders(
+    host: &AgentHost,
+    task: &Task,
+    thread_id: Option<&str>,
+) -> Result<Vec<String>, String> {
+    if let Some(thread_id) = thread_id {
+        if let Some(snapshot) = saved_task_session(host, thread_id).await? {
+            return Ok(snapshot
+                .folders
+                .into_iter()
+                .filter_map(|folder| {
+                    let source = PathBuf::from(&folder.source);
+                    let resolved = PathBuf::from(&folder.path);
+                    (canonical_path(&source).ok() == canonical_path(&resolved).ok())
+                        .then(|| folder.path)
+                })
+                .collect());
+        }
+    }
+    if let Some(project) = host.task_workspace_project(&task.id).await? {
+        return project_shared_folders(&project).await;
+    }
+    if let Some(project_id) = task.project_id.as_deref() {
+        let project = host
+            .projects
+            .read(project_id)
+            .await?
+            .ok_or("Task project no longer exists")?;
+        return project_shared_folders(&project).await;
+    }
+    let Some(cwd) = task.cwd.as_deref() else {
+        return Ok(Vec::new());
+    };
+    let path = canonical_path(Path::new(cwd))?;
+    if worktrunk::git::Repository::at_fresh(&path).is_ok() {
+        Ok(Vec::new())
+    } else {
+        Ok(vec![path.to_string_lossy().into_owned()])
+    }
+}
+
+async fn project_shared_folders(
+    project: &crate::projects::ProjectRecord,
+) -> Result<Vec<String>, String> {
+    let mut roots = Vec::new();
+    for folder in &project.folders {
+        let path = canonical_path(Path::new(folder))?;
+        if worktrunk::git::Repository::at_fresh(&path).is_err() {
+            roots.push(path.to_string_lossy().into_owned());
+        }
+    }
+    Ok(roots)
+}
+
+fn canonical_path(path: &Path) -> Result<PathBuf, String> {
+    std::fs::canonicalize(path).map_err(|error| {
+        format!(
+            "Cannot resolve shared task folder {}: {error}",
+            path.display()
+        )
+    })
+}
+
+fn canonical_workspace_roots(roots: Vec<String>) -> Result<Vec<String>, String> {
+    let mut paths = roots
+        .into_iter()
+        .map(|root| canonical_path(Path::new(&root)))
+        .collect::<Result<Vec<_>, _>>()?;
+    paths.sort();
+    paths.dedup();
+    let keep = paths
+        .iter()
+        .enumerate()
+        .filter_map(|(i, path)| {
+            if paths
+                .iter()
+                .enumerate()
+                .any(|(j, other)| i != j && path.starts_with(other))
+            {
+                None
+            } else {
+                Some(path.to_string_lossy().into_owned())
+            }
+        })
+        .collect();
+    Ok(keep)
+}
+
+fn roots_overlap_any(left: &[String], right: &[String]) -> bool {
+    left.iter().any(|a| {
+        let a = Path::new(a);
+        right.iter().any(|b| {
+            let b = Path::new(b);
+            a.starts_with(b) || b.starts_with(a)
+        })
+    })
+}
+
 fn mark_active(workers: &WorkerState, run_id: &str) -> bool {
     workers
         .inner
@@ -852,23 +1471,73 @@ async fn execute_claim(
     run: &TaskRun,
 ) -> Result<(), String> {
     let task = host.store.get_task(&run.task_id).await?;
-    workers.acquire_workspace(&run.id, &task).await?;
     let has_thread = run.thread_id.is_some();
+    let approved_ticket = if has_thread {
+        None
+    } else {
+        let approved = workers
+            .inner
+            .approved_ticket_projects
+            .lock()
+            .unwrap()
+            .get(&run.id)
+            .cloned();
+        let approved = match approved {
+            Some(approved) => Some(approved),
+            None => crate::tickets::approved_ticket_project(host, &task).await?,
+        };
+        if let Some(approved) = approved.as_ref() {
+            crate::tickets::validate_approved_ticket_project(host, &task, approved).await?;
+            workers
+                .inner
+                .approved_ticket_projects
+                .lock()
+                .unwrap()
+                .entry(run.id.clone())
+                .or_insert_with(|| approved.clone());
+        }
+        approved
+    };
+    workers
+        .acquire_task_workspace(host, &run.id, &task, run.thread_id.as_deref())
+        .await?;
     let run = if has_thread {
         host.store.recover_run(&run.id, &run.lease_token).await?
     } else {
         host.require_account().await?;
         let profile = host.store.read_profile(&task.agent_id).await?;
-        let session = host
-            .open_session(
+        let source_project = host.task_workspace_project(&task.id).await?;
+        let session = if let Some(project) = source_project.as_ref() {
+            host.open_task_session_with_project_snapshot(
+                Some(task.agent_id.clone()),
+                task.model.as_deref().unwrap_or(&profile.model),
+                &run.id,
+                task.workspace_permission.clone(),
+                project,
+            )
+            .await?
+        } else if let Some(approved) = approved_ticket.as_ref() {
+            host.open_task_session_with_project_snapshot(
+                Some(task.agent_id.clone()),
+                task.model.as_deref().unwrap_or(&profile.model),
+                &run.id,
+                task.workspace_permission.clone(),
+                &approved.workspace_project,
+            )
+            .await?
+        } else {
+            host.open_session(
                 Some(task.agent_id.clone()),
                 "task",
                 task.model.as_deref().unwrap_or(&profile.model),
                 task.cwd.as_deref(),
+                task.project_id.as_deref(),
                 false,
                 Some(run.id.clone()),
+                task.workspace_permission.clone(),
             )
-            .await?;
+            .await?
+        };
         let thread_id = session["thread"]["id"]
             .as_str()
             .ok_or("task thread start returned no thread ID")?;
@@ -892,6 +1561,7 @@ async fn recover_task_run(
     let Some(thread_id) = run.thread_id.as_deref() else {
         return Box::pin(execute_claim(host, workers, &run)).await;
     };
+    let _saved_workspace = saved_task_session(host, thread_id).await?;
     host.require_account().await?;
     host.rpc
         .call(
@@ -1031,13 +1701,27 @@ async fn start_task_turn_with_id(
         .as_deref()
         .ok_or("task run is missing its persisted thread binding")?;
     let prompt = task_prompt(task, continuation);
-    let params = json!({
+    let mut params = json!({
         "threadId":thread_id,
         "clientUserMessageId":client_message_id,
         "model":task.model,
         "effort":task.effort,
+        "approvalPolicy":"on-request",
         "input":[{"type":"text","text":prompt,"text_elements":[]}]
     });
+    if let Some(permission) = task.workspace_permission.as_ref() {
+        let roots = if let Some(snapshot) = saved_task_session(host, thread_id).await? {
+            snapshot.roots
+        } else {
+            vec![host
+                .store
+                .session_binding(thread_id)
+                .await?
+                .cwd
+                .ok_or("task session has no saved workspace")?]
+        };
+        params["sandboxPolicy"] = task_sandbox_override(permission, &roots);
+    }
     let params = host.prepare_turn(thread_id, params).await?;
     sqlx::query("UPDATE agent_task_submissions SET dispatched=1 WHERE run_id=? AND client_user_message_id=?")
         .bind(&run.id).bind(&client_message_id).execute(host.store.pool()).await.map_err(|error|error.to_string())?;
@@ -1062,6 +1746,39 @@ async fn start_task_turn_with_id(
     record_turn(host, &run, turn_id, "inProgress", false, false).await?;
     host.changed();
     Ok(())
+}
+
+fn task_sandbox_override(permission: &WorkspacePermission, saved_roots: &[String]) -> Value {
+    match permission {
+        WorkspacePermission::ReadOnly => json!({"type":"readOnly","networkAccess":false}),
+        WorkspacePermission::WorkspaceWrite => {
+            json!({"type":"workspaceWrite","writableRoots":saved_roots,"networkAccess":false,"excludeTmpdirEnvVar":false,"excludeSlashTmp":false})
+        }
+    }
+}
+
+async fn saved_task_session(
+    host: &AgentHost,
+    thread_id: &str,
+) -> Result<Option<crate::worktrees::SessionWorkspace>, String> {
+    match host.worktrees.get_session(thread_id) {
+        Ok(Some(snapshot)) => {
+            host.worktrees.validate_session(&snapshot).await?;
+            Ok(Some(snapshot))
+        }
+        Ok(None) => Ok(None),
+        Err(session_error) if session_error.contains("corrupt") => {
+            // Older managed threads stored a single Workspace record. Preserve that
+            // recovery path only when the old record parses and still validates.
+            if let Some(legacy) = host.worktrees.get(thread_id)? {
+                host.worktrees.validate(&legacy).await?;
+                Ok(None)
+            } else {
+                Err(session_error)
+            }
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn task_prompt(task: &Task, continuation: bool) -> String {
@@ -1101,6 +1818,35 @@ async fn settle_observed_turn(
     let effects_unknown = has_unknown_effects(turn);
     record_turn(host, run, turn_id, status, effects_unknown, false).await?;
     let has_proposal = completion_proposed(host, &run.id, &run.task_id, &run.lease_token).await?;
+    let pending_questions = host.store.pending_run_questions(&run.id).await?;
+    match question_turn_action(pending_questions, status, effects_unknown) {
+        QuestionTurnAction::WaitForInput => {
+            host.store
+                .wait_for_input(&task.id, &run.id, &run.lease_token)
+                .await?;
+            mark_turn_processed(host, &run.id, turn_id).await?;
+            workers.inner.active_runs.lock().unwrap().remove(&run.id);
+            // Keep the workspace reservation and lock across the user-input wait.
+            host.changed();
+            return Ok(());
+        }
+        QuestionTurnAction::BlockUnknown => {
+            host.store
+                .block_run(
+                    &task.id,
+                    &run.id,
+                    &run.lease_token,
+                    "The task turn ended with an unresolved external effect or unknown status. Review it before continuing.",
+                    true,
+                )
+                .await?;
+            mark_turn_processed(host, &run.id, turn_id).await?;
+            workers_release(host, workers, &run.id, &run.lease_token).await;
+            host.changed();
+            return Ok(());
+        }
+        QuestionTurnAction::Continue => {}
+    }
     if may_settle_success(status, has_proposal) {
         host.store
             .settle_run(&task.id, &run.id, turn_id, &run.lease_token, true)
@@ -1244,7 +1990,7 @@ async fn mark_turn_processed(host: &AgentHost, run_id: &str, turn_id: &str) -> R
     Ok(())
 }
 
-fn has_unknown_effects(turn: &Value) -> bool {
+pub(crate) fn has_unknown_effects(turn: &Value) -> bool {
     turn["items"].as_array().is_some_and(|items| {
         items.iter().any(|item| {
             let kind = item["type"].as_str().unwrap_or("");
@@ -1263,7 +2009,7 @@ fn has_unknown_effects(turn: &Value) -> bool {
     })
 }
 
-fn turn_has_client_message(turn: &Value, client_message_id: &str) -> bool {
+pub(crate) fn turn_has_client_message(turn: &Value, client_message_id: &str) -> bool {
     turn["items"].as_array().is_some_and(|items| {
         items.iter().any(|item| {
             item["type"].as_str() == Some("userMessage")
@@ -1282,7 +2028,7 @@ async fn persist_submission_turn(
     Ok(())
 }
 
-async fn thread_turns(host: &AgentHost, thread_id: &str) -> Result<Vec<Value>, String> {
+pub(crate) async fn thread_turns(host: &AgentHost, thread_id: &str) -> Result<Vec<Value>, String> {
     let mut cursor: Option<String> = None;
     let mut turns = Vec::new();
     loop {
@@ -1369,6 +2115,10 @@ async fn handle_notification(
         if let Some(id) = request_id(&event["params"]) {
             workers.inner.approvals.lock().unwrap().remove(&id);
         }
+        return Ok(());
+    }
+    if method == "item/tool/requestUserInput" {
+        host.wait_for_question_input(event).await?;
         return Ok(());
     }
     if method == "item/completed" {
@@ -1662,7 +2412,16 @@ async fn start_pending_learning(host: &AgentHost, workers: &WorkerState) -> Resu
         }
     };
     let session = match host
-        .open_session(agent_id.clone(), "learning", &model, None, true, None)
+        .open_session(
+            agent_id.clone(),
+            "learning",
+            &model,
+            None,
+            None,
+            true,
+            None,
+            None,
+        )
         .await
     {
         Ok(session) => session,
@@ -1845,6 +2604,27 @@ fn may_settle_success(status: &str, proposal_present: bool) -> bool {
     status == "completed" && proposal_present
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum QuestionTurnAction {
+    Continue,
+    WaitForInput,
+    BlockUnknown,
+}
+
+fn question_turn_action(
+    has_pending_question: bool,
+    status: &str,
+    effects_unknown: bool,
+) -> QuestionTurnAction {
+    if !has_pending_question || matches!(status, "inProgress" | "in_progress") {
+        return QuestionTurnAction::Continue;
+    }
+    if effects_unknown || !matches!(status, "completed" | "interrupted" | "failed") {
+        return QuestionTurnAction::BlockUnknown;
+    }
+    QuestionTurnAction::WaitForInput
+}
+
 fn unreserved_sources(
     available: Vec<LearningSource>,
     reserved: &HashSet<String>,
@@ -2001,9 +2781,439 @@ fn validate_run_binding(
     Ok(())
 }
 
+fn question_run_binding_matches(
+    question: &QuestionRequest,
+    task: &Task,
+    run: &TaskRun,
+    binding: &SessionBinding,
+) -> bool {
+    question.task_id.as_deref() == Some(task.id.as_str())
+        && question.run_id.as_deref() == Some(run.id.as_str())
+        && run.task_id == task.id
+        && run.agent_id == task.agent_id
+        && question
+            .agent_id
+            .as_deref()
+            .is_none_or(|agent| agent == task.agent_id)
+        && run.thread_id.as_deref() == Some(question.thread_id.as_str())
+        && binding.kind == "task"
+        && binding.thread_id == question.thread_id
+        && binding.task_run_id.as_deref() == Some(run.id.as_str())
+        && binding
+            .agent_id
+            .as_deref()
+            .is_none_or(|agent| agent == run.agent_id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn approved_folderless_ticket_uses_private_scratch_with_project_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime_path = dir.path().join("runtime.py");
+        std::fs::write(
+            &runtime_path,
+            r#"
+import json,sys
+def send(v): print(json.dumps(v),flush=True)
+for line in sys.stdin:
+    m=json.loads(line)
+    if 'method' not in m or 'id' not in m: continue
+    method=m['method']
+    if method=='account/read': result={'account':{'type':'chatgpt'}}
+    else: result={}
+    send({'id':m['id'],'result':result})
+"#,
+        )
+        .unwrap();
+        let mut command = tokio::process::Command::new("python3");
+        command.arg(&runtime_path).current_dir(dir.path());
+        let engine = crate::bridge::Engine::connect(command, Arc::new(|_| {}))
+            .await
+            .unwrap();
+        engine.agents.stop().await;
+        let project = engine
+            .agents
+            .projects
+            .create(crate::projects::ProjectInput {
+                name: "Scratch ticket".into(),
+                folders: vec![],
+                primary_folder: None,
+                model: None,
+                effort: None,
+                permission: None,
+            })
+            .await
+            .unwrap();
+        let draft = engine
+            .agents
+            .store
+            .propose_profile(
+                "scratch-ticket",
+                None,
+                brr_agent_core::ProfileCandidate {
+                    name: "Scratch runner".into(),
+                    description: "Runs scratch tickets".into(),
+                    instructions: "Complete the approved ticket".into(),
+                    soul: "Be careful".into(),
+                    model: "fixture".into(),
+                    effort: "medium".into(),
+                },
+            )
+            .await
+            .unwrap();
+        engine
+            .agents
+            .store
+            .approve_profile(&draft.id, &draft.hash, "scratch-profile-review")
+            .await
+            .unwrap();
+        let profile = engine
+            .agents
+            .store
+            .apply_profile(&draft.id, &draft.hash, "scratch-profile-apply")
+            .await
+            .unwrap();
+        let ticket = crate::tickets::request_stores(&engine.agents.store, &engine.agents.projects,
+            "create", json!({"projectId":project.id,"title":"Scratch ticket","description":"Run privately",
+                "acceptanceCriteria":["Keep project scope"],"agentId":profile.id,"operationId":"scratch-ticket-create"})
+        ).await.unwrap();
+        let proposal = crate::tickets::request_stores(&engine.agents.store, &engine.agents.projects,
+            "proposeRun", json!({"ticketId":ticket["id"],"revision":ticket["revision"],"operationId":"scratch-ticket-propose"})
+        ).await.unwrap();
+        let task = engine
+            .agents
+            .store
+            .approve_ticket_run(
+                ticket["id"].as_str().unwrap(),
+                proposal["hash"].as_str().unwrap(),
+                brr_agent_core::TicketMutation {
+                    operation_id: "scratch-ticket-approve".into(),
+                    actor: brr_agent_core::TicketActor::human(),
+                },
+            )
+            .await
+            .unwrap();
+        let approved = crate::tickets::approved_ticket_project(&engine.agents, &task)
+            .await
+            .unwrap()
+            .unwrap();
+        crate::tickets::validate_approved_ticket_project(&engine.agents, &task, &approved)
+            .await
+            .unwrap();
+        assert_eq!(approved.reviewed.id, project.id);
+        assert!(approved.selected_folder.is_none());
+        assert!(approved.workspace_project.folders.is_empty());
+        let workspace = engine
+            .agents
+            .worktrees
+            .prepare_session(Some(&approved.workspace_project))
+            .await
+            .unwrap();
+        assert!(std::path::Path::new(&workspace.cwd).is_dir());
+        assert_eq!(workspace.roots, vec![workspace.cwd.clone()]);
+        assert!(workspace.folders.is_empty());
+        assert_eq!(
+            workspace.scope_project_id.as_deref(),
+            Some(project.id.as_str())
+        );
+        assert_eq!(workspace.project_revision, Some(project.revision));
+        engine.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn queued_ticket_with_changed_project_is_blocked_before_any_runtime_thread() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime_path = dir.path().join("runtime.py");
+        std::fs::write(
+            &runtime_path,
+            r#"
+import json,sys
+def send(v): print(json.dumps(v),flush=True)
+for line in sys.stdin:
+    m=json.loads(line)
+    if 'method' not in m or 'id' not in m: continue
+    method=m['method']
+    with open('runtime-calls.txt','a') as f: f.write(method+'\n')
+    if method=='account/read': result={'account':{'type':'chatgpt'}}
+    elif method=='thread/start': result={'thread':{'id':'must-not-start','cwd':m.get('params',{}).get('cwd'),'turns':[]}}
+    elif method=='turn/start':
+        send({'id':m['id'],'error':{'code':-32000,'message':'fixture must not receive a ticket turn'}})
+        continue
+    else: result={}
+    send({'id':m['id'],'result':result})
+"#,
+        )
+        .unwrap();
+        let mut command = tokio::process::Command::new("python3");
+        command.arg(&runtime_path).current_dir(dir.path());
+        let engine = crate::bridge::Engine::connect(command, Arc::new(|_| {}))
+            .await
+            .unwrap();
+        engine.agents.stop().await;
+
+        let first = dir.path().join("project-a");
+        let second = dir.path().join("project-b");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        let project = engine
+            .agents
+            .projects
+            .create(crate::projects::ProjectInput {
+                name: "A then B".into(),
+                folders: vec![first.to_string_lossy().into_owned()],
+                primary_folder: None,
+                model: None,
+                effort: None,
+                permission: None,
+            })
+            .await
+            .unwrap();
+        let draft = engine
+            .agents
+            .store
+            .propose_profile(
+                "queued-ticket-test",
+                None,
+                brr_agent_core::ProfileCandidate {
+                    name: "Queued ticket runner".into(),
+                    description: "Runs ticket work".into(),
+                    instructions: "Follow the reviewed ticket".into(),
+                    soul: "Be careful".into(),
+                    model: "fixture".into(),
+                    effort: "medium".into(),
+                },
+            )
+            .await
+            .unwrap();
+        engine
+            .agents
+            .store
+            .approve_profile(&draft.id, &draft.hash, "queued-ticket-profile-review")
+            .await
+            .unwrap();
+        let profile = engine
+            .agents
+            .store
+            .apply_profile(&draft.id, &draft.hash, "queued-ticket-profile-apply")
+            .await
+            .unwrap();
+        let ticket = crate::tickets::request_stores(
+            &engine.agents.store,
+            &engine.agents.projects,
+            "create",
+            json!({
+                "projectId": project.id,
+                "title": "Wait for reviewed folder",
+                "description": "Run in project A only",
+                "acceptanceCriteria": ["Use the reviewed folder"],
+                "agentId": profile.id,
+                "operationId": "queued-ticket-create"
+            }),
+        )
+        .await
+        .unwrap();
+        let proposal = crate::tickets::request_stores(
+            &engine.agents.store,
+            &engine.agents.projects,
+            "proposeRun",
+            json!({
+                "ticketId": ticket["id"],
+                "revision": ticket["revision"],
+                "operationId": "queued-ticket-propose"
+            }),
+        )
+        .await
+        .unwrap();
+        let task = engine
+            .agents
+            .store
+            .approve_ticket_run(
+                ticket["id"].as_str().unwrap(),
+                proposal["hash"].as_str().unwrap(),
+                brr_agent_core::TicketMutation {
+                    operation_id: "queued-ticket-approve".into(),
+                    actor: brr_agent_core::TicketActor::human(),
+                },
+            )
+            .await
+            .unwrap();
+
+        let run = engine
+            .agents
+            .store
+            .claim_ready("ticket-guard-test")
+            .await
+            .unwrap()
+            .unwrap();
+        let task_row = engine.agents.store.get_task(&task.id).await.unwrap();
+        let workers = WorkerState::new();
+        workers
+            .reserve_task_workspace(&engine.agents, &run.id, &task_row, None)
+            .await
+            .unwrap();
+        let mut changed_project = project;
+        changed_project
+            .folders
+            .push(second.to_string_lossy().into_owned());
+        engine.agents.projects.save(changed_project).await.unwrap();
+        let roots = workers
+            .inner
+            .workspace_reservations
+            .lock()
+            .unwrap()
+            .get(&run.id)
+            .cloned()
+            .unwrap_or_default();
+        assert!(roots.contains(&first.canonicalize().unwrap().to_string_lossy().into_owned()));
+        assert!(!roots.contains(
+            &second
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        ));
+
+        let error = execute_claim(&engine.agents, &workers, &run)
+            .await
+            .unwrap_err();
+        block_after_runtime_error(&engine.agents, &workers, &run, &error).await;
+        assert!(error.contains("project configuration changed"));
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("runtime-calls.txt"))
+                .unwrap_or_default()
+                .lines()
+                .filter(|method| *method == "thread/start")
+                .count(),
+            0
+        );
+        assert_eq!(
+            engine.agents.store.get_task(&task.id).await.unwrap().status,
+            "blocked"
+        );
+        engine.shutdown().await;
+    }
+
+    #[test]
+    fn task_continuations_preserve_reviewed_workspace_permissions_at_saved_cwd() {
+        assert_eq!(
+            task_sandbox_override(
+                &WorkspacePermission::ReadOnly,
+                &["/worktrees/task-1".into()]
+            ),
+            json!({"type":"readOnly","networkAccess":false})
+        );
+        assert_eq!(
+            task_sandbox_override(
+                &WorkspacePermission::WorkspaceWrite,
+                &["/worktrees/task-1".into(), "/shared/docs".into()]
+            ),
+            json!({"type":"workspaceWrite","writableRoots":["/worktrees/task-1","/shared/docs"],"networkAccess":false,"excludeTmpdirEnvVar":false,"excludeSlashTmp":false})
+        );
+    }
+
+    #[test]
+    fn root_overlap_matches_only_equal_or_ancestor_paths() {
+        assert!(roots_overlap_any(
+            &["/workspace/project".into()],
+            &["/workspace/project/docs".into()]
+        ));
+        assert!(!roots_overlap_any(
+            &["/workspace/project-a".into()],
+            &["/workspace/project-b".into()]
+        ));
+    }
+
+    #[test]
+    fn canonical_workspace_roots_remove_nested_duplicates() {
+        let temp = tempfile::tempdir().unwrap();
+        let child = temp.path().join("child");
+        std::fs::create_dir_all(&child).unwrap();
+        let roots = canonical_workspace_roots(vec![
+            temp.path().display().to_string(),
+            child.display().to_string(),
+        ])
+        .unwrap();
+        assert_eq!(
+            roots,
+            vec![temp.path().canonicalize().unwrap().display().to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn overlapping_shared_folder_reservations_wait_until_prior_run_releases() {
+        let temp = tempfile::tempdir().unwrap();
+        let parent = temp.path().join("project");
+        let child = parent.join("docs");
+        std::fs::create_dir_all(&child).unwrap();
+        let state = WorkerState::new();
+        state
+            .reserve_workspace_roots("parent-run", vec![parent.display().to_string()])
+            .unwrap();
+        state
+            .acquire_reserved_roots("parent-run", vec![parent.display().to_string()])
+            .await
+            .unwrap();
+        let waiter = {
+            let state = state.clone();
+            let child = child.display().to_string();
+            tokio::spawn(async move {
+                state
+                    .reserve_workspace_roots("child-run", vec![child.clone()])
+                    .unwrap();
+                state
+                    .acquire_reserved_roots("child-run", vec![child])
+                    .await
+                    .unwrap();
+            })
+        };
+        assert!(tokio::time::timeout(Duration::from_millis(40), async {
+            while !waiter.is_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .is_err());
+        state.release_workspace("parent-run");
+        tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .unwrap()
+            .unwrap();
+        state.release_workspace("child-run");
+    }
+
+    #[tokio::test]
+    async fn sibling_shared_folder_reservations_acquire_concurrently() {
+        let temp = tempfile::tempdir().unwrap();
+        let left = temp.path().join("project-a");
+        let right = temp.path().join("project-b");
+        std::fs::create_dir_all(&left).unwrap();
+        std::fs::create_dir_all(&right).unwrap();
+        let state = WorkerState::new();
+        state
+            .reserve_workspace_roots("left-run", vec![left.display().to_string()])
+            .unwrap();
+        state
+            .acquire_reserved_roots("left-run", vec![left.display().to_string()])
+            .await
+            .unwrap();
+        state
+            .reserve_workspace_roots("right-run", vec![right.display().to_string()])
+            .unwrap();
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            state.acquire_reserved_roots("right-run", vec![right.display().to_string()]),
+        )
+        .await
+        .expect("unrelated sibling roots should not block each other")
+        .unwrap();
+        state.release_workspace("left-run");
+        state.release_workspace("right-run");
+    }
+
+    use brr_agent_core::{AgentStore, ProfileCandidate};
 
     fn learning_source(reference: &str, content: &str) -> LearningSource {
         let (_, revision) = reference.rsplit_once('@').unwrap();
@@ -2037,6 +3247,68 @@ mod tests {
         }
     }
 
+    #[test]
+    fn earlier_async_question_can_activate_the_same_live_task_run() {
+        let mut run = task_run("task-1", "run-1", "lease", "running");
+        run.thread_id = Some("thread-1".into());
+        run.turn_id = Some("answer-turn".into());
+        let task = Task {
+            id: "task-1".into(),
+            agent_id: "agent-test".into(),
+            title: "task".into(),
+            instructions: "instructions".into(),
+            acceptance_criteria: vec![],
+            context: None,
+            cwd: None,
+            project_id: None,
+            model: None,
+            effort: None,
+            workspace_permission: None,
+            dependencies: vec![],
+            status: "running".into(),
+            reason: None,
+            run_id: Some("run-1".into()),
+            thread_id: Some("thread-1".into()),
+            result: None,
+            evidence: None,
+            created_at: 0,
+            updated_at: 0,
+        };
+        let binding = SessionBinding {
+            thread_id: "thread-1".into(),
+            agent_id: Some("agent-test".into()),
+            kind: "task".into(),
+            project_id: None,
+            cwd: None,
+            task_run_id: Some("run-1".into()),
+            learning_eligible: false,
+        };
+        let question = QuestionRequest {
+            id: "question-1".into(),
+            thread_id: "thread-1".into(),
+            turn_id: "source-turn".into(),
+            item_id: "item-1".into(),
+            agent_id: Some("agent-test".into()),
+            task_id: Some("task-1".into()),
+            run_id: Some("run-1".into()),
+            kind: "async".into(),
+            questions: vec![],
+            runtime_generation: None,
+            runtime_request_id: None,
+            draft: Default::default(),
+            answers: None,
+            resolution: "answered".into(),
+            delivery: "queued".into(),
+            reason: None,
+            client_message_id: Some("message-1".into()),
+            created_at: 0,
+            updated_at: 0,
+        };
+        assert!(question_run_binding_matches(
+            &question, &task, &run, &binding
+        ));
+    }
+
     fn learning_batch_bytes(batch: &[LearningSource]) -> usize {
         serde_json::to_vec(&batch.iter().map(|source| &source.wire).collect::<Vec<_>>())
             .unwrap()
@@ -2049,6 +3321,30 @@ mod tests {
         assert!(!may_settle_success("interrupted", true));
         assert!(!may_settle_success("failed", true));
         assert!(may_settle_success("completed", true));
+    }
+
+    #[test]
+    fn pending_questions_park_safe_ended_turns_but_unknown_effects_still_block() {
+        assert_eq!(
+            question_turn_action(true, "completed", false),
+            QuestionTurnAction::WaitForInput
+        );
+        assert_eq!(
+            question_turn_action(true, "interrupted", false),
+            QuestionTurnAction::WaitForInput
+        );
+        assert_eq!(
+            question_turn_action(true, "failed", true),
+            QuestionTurnAction::BlockUnknown
+        );
+        assert_eq!(
+            question_turn_action(true, "inProgress", false),
+            QuestionTurnAction::Continue
+        );
+        assert_eq!(
+            question_turn_action(false, "completed", false),
+            QuestionTurnAction::Continue
+        );
     }
 
     #[test]
@@ -2371,6 +3667,7 @@ mod tests {
                 project_id: None,
                 model: None,
                 effort: None,
+                workspace_permission: None,
                 dependencies: vec![],
             })
             .await
@@ -2396,7 +3693,10 @@ mod tests {
         assert!(!runtime_error_owner_is_current(&old, &current));
         assert_eq!(
             workers.excluded_workspaces(),
-            vec![task.cwd.clone().unwrap()]
+            vec![std::fs::canonicalize(task.cwd.as_ref().unwrap())
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()]
         );
     }
 
@@ -2435,6 +3735,7 @@ mod tests {
             project_id: None,
             model: None,
             effort: None,
+            workspace_permission: None,
             dependencies: Vec::new(),
             status: "running".into(),
             reason: None,
@@ -2446,7 +3747,10 @@ mod tests {
             updated_at: 0,
         };
         state.acquire_workspace("run-1", &task).await.unwrap();
-        let workspace = task.cwd.clone().unwrap();
+        let workspace = std::fs::canonicalize(task.cwd.as_ref().unwrap())
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
         assert_eq!(state.excluded_workspaces(), vec![workspace.clone()]);
 
         // Admission reserves the next writer before dispatch. Do not depend on a
@@ -2485,5 +3789,436 @@ mod tests {
         state.release_workspace("run-2");
         assert!(state.excluded_workspaces().is_empty());
         second.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn ended_async_question_can_be_paused_and_resumed_without_interrupt_or_requeue() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = AgentStore::open(dir.path().join("agents")).await.unwrap();
+        store
+            .update_task_settings(brr_agent_core::TaskSettings {
+                max_background: 5,
+                max_per_agent: 5,
+            })
+            .await
+            .unwrap();
+        let draft = store
+            .propose_profile(
+                "question-control-test",
+                None,
+                ProfileCandidate {
+                    name: "Question worker".into(),
+                    description: "Worker for question control regression".into(),
+                    instructions: "Follow the task".into(),
+                    soul: "Be precise".into(),
+                    model: "fixture".into(),
+                    effort: "medium".into(),
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .approve_profile(&draft.id, &draft.hash, "question-control-review")
+            .await
+            .unwrap();
+        let profile = store
+            .apply_profile(&draft.id, &draft.hash, "question-control-apply")
+            .await
+            .unwrap();
+
+        let runtime = dir.path().join("runtime.py");
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(
+            &runtime,
+            r#"
+import json,sys,os
+history_path='runtime-history.json'
+turns=json.load(open(history_path)) if os.path.exists(history_path) else {}
+thread_count=len(turns)
+def send(value): print(json.dumps(value),flush=True)
+for line in sys.stdin:
+    message=json.loads(line)
+    if 'method' not in message or 'id' not in message: continue
+    method=message['method']; p=message.get('params',{}); result={}
+    if method=='account/read': result={'account':{'type':'chatgpt'}}
+    elif method=='account/rateLimits/read': result={'rateLimits':{'primary':{'usedPercent':0}}}
+    elif method=='thread/start':
+        thread_count+=1
+        thread='question-worker-thread-'+str(thread_count)
+        turns[thread]=[]
+        json.dump(turns,open(history_path,'w'))
+        result={'thread':{'id':thread,'cwd':p.get('cwd'),'turns':[]}}
+    elif method in ('thread/resume','thread/read'):
+        result={'thread':{'id':p['threadId'],'turns':turns.get(p['threadId'],[])}}
+    elif method=='thread/turns/list':
+        result={'data':list(reversed(turns.get(p['threadId'],[]))),'nextCursor':None}
+    elif method=='turn/start':
+        thread=p['threadId']; turn_id='source-turn-'+str(len(turns.get(p['threadId'],[]))+1)
+        turn={'id':turn_id,'status':'inProgress','items':[]}
+        turns[thread].append(turn)
+        send({'id':message['id'],'result':{'turn':{'id':turn_id}}})
+        send({'method':'turn/started','params':{'threadId':thread,'turn':turn}})
+        answer_followup=any(x.get('text','').startswith('User response to question request') for x in p.get('input',[]) if isinstance(x,dict))
+        if not answer_followup:
+            item={'id':'async-question-'+turn_id,'type':'agentMessage','delivery':'async','questions':[{'title':'Choose a destination','options':['Workspace']}]}
+            turn['items'].append(item)
+            send({'method':'item/completed','params':{'threadId':thread,'turnId':turn_id,'item':item}})
+        turn['status']='completed'
+        json.dump(turns,open(history_path,'w'))
+        send({'method':'turn/completed','params':{'threadId':thread,'turn':turn}})
+        continue
+    elif method=='turn/interrupt':
+        send({'id':message['id'],'error':{'code':-32602,'message':'no active turn to interrupt'}})
+        continue
+    send({'id':message['id'],'result':result})
+"#,
+        )
+        .unwrap();
+        let mut command = tokio::process::Command::new("python3");
+        command.arg(&runtime).current_dir(dir.path());
+        let events = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let event_log = events.clone();
+        let engine = crate::bridge::Engine::connect(
+            command,
+            Arc::new(move |event| event_log.lock().unwrap().push(event)),
+        )
+        .await
+        .unwrap();
+        let task = engine
+            .agents_request(
+                "tasks.create",
+                json!({"agentId":profile.id,"title":"Wait for answer","instructions":"Ask the user for a destination.","acceptanceCriteria":["Use the selected destination."],"cwd":workspace}),
+            )
+            .await
+            .unwrap();
+        let task_id = task["id"].as_str().unwrap();
+        let wait_for_question = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let data = engine
+                    .agents_request("tasks.list", json!({}))
+                    .await
+                    .unwrap();
+                if data["data"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|task| task["id"] == task_id && task["status"] == "waiting_input")
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        if wait_for_question.is_err() {
+            panic!(
+                "completed question turn should park its task; tasks: {}; events: {:?}",
+                engine
+                    .agents_request("tasks.list", json!({}))
+                    .await
+                    .unwrap(),
+                *events.lock().unwrap()
+            );
+        }
+        let listed = engine
+            .agents_request("tasks.list", json!({}))
+            .await
+            .unwrap();
+        let task_thread = listed["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|listed_task| listed_task["id"] == task_id)
+            .unwrap()["threadId"]
+            .clone();
+
+        engine
+            .agents_request("tasks.control", json!({"taskId":task_id,"action":"pause"}))
+            .await
+            .unwrap();
+        let resumed = engine
+            .agents_request("tasks.control", json!({"taskId":task_id,"action":"resume"}))
+            .await
+            .unwrap();
+        assert_eq!(resumed["status"], "waiting_input");
+        let questions = engine
+            .agents_request(
+                "questions.list",
+                json!({"threadId":task_thread,"pendingOnly":true}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(questions["data"].as_array().unwrap().len(), 1);
+
+        engine
+            .agents_request("tasks.control", json!({"taskId":task_id,"action":"cancel"}))
+            .await
+            .unwrap();
+        assert!(engine
+            .agents_request(
+                "questions.list",
+                json!({"threadId":task_thread,"pendingOnly":true}),
+            )
+            .await
+            .unwrap()["data"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+
+        let next = engine
+            .agents_request(
+                "tasks.create",
+                json!({"agentId":profile.id,"title":"Reuse workspace","instructions":"Ask the user for a destination.","acceptanceCriteria":["Use the selected destination."],"cwd":workspace}),
+            )
+            .await
+            .unwrap();
+        let next_id = next["id"].as_str().unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let data = engine
+                    .agents_request("tasks.list", json!({}))
+                    .await
+                    .unwrap();
+                if data["data"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|task| task["id"] == next_id && task["status"] == "waiting_input")
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("cancelling a question task releases its non-Git workspace");
+
+        let tasks = engine
+            .agents_request("tasks.list", json!({}))
+            .await
+            .unwrap();
+        let next_task = tasks["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|task| task["id"] == next_id)
+            .unwrap();
+        let next_thread = next_task["threadId"].as_str().unwrap().to_owned();
+        let next_run_id = next_task["runId"].as_str().unwrap().to_owned();
+        let unanswered = engine
+            .agents_request(
+                "questions.list",
+                json!({"threadId":next_thread,"pendingOnly":true}),
+            )
+            .await
+            .unwrap();
+        let question_id = unanswered["data"][0]["id"].as_str().unwrap();
+        engine.shutdown().await;
+        let durable_store = AgentStore::open(dir.path().join("agents")).await.unwrap();
+        durable_store
+            .resolve_question(
+                question_id,
+                Some(std::collections::BTreeMap::from([(
+                    "question_1".to_owned(),
+                    vec!["Workspace".to_owned()],
+                )])),
+            )
+            .await
+            .unwrap();
+        let queued_run = durable_store.get_run(&next_run_id).await.unwrap();
+        durable_store
+            .resume_run(
+                next_id,
+                &queued_run.id,
+                &queued_run.lease_token,
+                "restart-recovery-test",
+            )
+            .await
+            .unwrap();
+        let mut restarted_command = tokio::process::Command::new("python3");
+        restarted_command.arg(runtime).current_dir(dir.path());
+        let restarted = crate::bridge::Engine::connect(restarted_command, Arc::new(|_| {}))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let all_questions = restarted
+                    .agents_request(
+                        "questions.list",
+                        json!({"threadId":next_thread,"pendingOnly":false}),
+                    )
+                    .await
+                    .unwrap();
+                if all_questions["data"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|question| {
+                        question["id"] == question_id && question["delivery"] == "delivered"
+                    })
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("startup recovery and queued answer activation must complete without deadlock");
+
+        let archive_workspace = dir.path().join("archive-workspace");
+        std::fs::create_dir_all(&archive_workspace).unwrap();
+        let archived_task = restarted
+            .agents_request(
+                "tasks.create",
+                json!({"agentId":profile.id,"title":"Archive waiting question","instructions":"Ask the user for a destination.","acceptanceCriteria":["Use the selected destination."],"cwd":archive_workspace}),
+            )
+            .await
+            .unwrap();
+        let archived_id = archived_task["id"].as_str().unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let tasks = restarted
+                    .agents_request("tasks.list", json!({}))
+                    .await
+                    .unwrap();
+                if tasks["data"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|task| task["id"] == archived_id && task["status"] == "waiting_input")
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("archive test task should reach its user-input wait");
+        let tasks = restarted
+            .agents_request("tasks.list", json!({}))
+            .await
+            .unwrap();
+        let archive_thread = tasks["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|task| task["id"] == archived_id)
+            .unwrap()["threadId"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        restarted
+            .request("thread/archive", json!({"threadId":archive_thread}))
+            .await
+            .unwrap();
+        let after_archive = restarted
+            .agents_request("tasks.list", json!({}))
+            .await
+            .unwrap();
+        assert!(
+            after_archive["data"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|task| { task["id"] == archived_id && task["status"] == "cancelled" }),
+            "archiving a parked question thread must cancel its scheduler-owned task"
+        );
+        let replacement = restarted
+            .agents_request(
+                "tasks.create",
+                json!({"agentId":profile.id,"title":"Reuse archived workspace","instructions":"Ask the user for a destination.","acceptanceCriteria":["Use the selected destination."],"cwd":archive_workspace}),
+            )
+            .await
+            .unwrap();
+        let replacement_id = replacement["id"].as_str().unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let tasks = restarted
+                    .agents_request("tasks.list", json!({}))
+                    .await
+                    .unwrap();
+                if tasks["data"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|task| task["id"] == replacement_id && task["status"] == "waiting_input")
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("archiving a question task releases its non-Git workspace");
+        let before_retry = restarted
+            .agents_request("tasks.list", json!({}))
+            .await
+            .unwrap();
+        let old_run_task = before_retry["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|task| task["id"] == replacement_id)
+            .unwrap();
+        let old_thread = old_run_task["threadId"].as_str().unwrap().to_owned();
+        let old_run_id = old_run_task["runId"].as_str().unwrap().to_owned();
+        restarted
+            .agents_request(
+                "tasks.control",
+                json!({"taskId":replacement_id,"action":"cancel"}),
+            )
+            .await
+            .unwrap();
+        restarted
+            .agents_request(
+                "tasks.control",
+                json!({"taskId":replacement_id,"action":"retry"}),
+            )
+            .await
+            .unwrap();
+        let retried = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let tasks = restarted
+                    .agents_request("tasks.list", json!({}))
+                    .await
+                    .unwrap();
+                if let Some(task) = tasks["data"].as_array().unwrap().iter().find(|task| {
+                    task["id"] == replacement_id
+                        && task["status"] == "waiting_input"
+                        && task["runId"]
+                            .as_str()
+                            .is_some_and(|run_id| run_id != old_run_id)
+                }) {
+                    break task.clone();
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("retry should create a fresh question-owning run");
+        restarted
+            .request("thread/archive", json!({"threadId":old_thread}))
+            .await
+            .unwrap();
+        let after_old_archive = restarted
+            .agents_request("tasks.list", json!({}))
+            .await
+            .unwrap();
+        assert!(
+            after_old_archive["data"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|task| {
+                    task["id"] == replacement_id
+                        && task["runId"] == retried["runId"]
+                        && task["status"] == "waiting_input"
+                }),
+            "archiving history from an older run must not cancel its successor"
+        );
+        tokio::time::timeout(Duration::from_secs(3), restarted.shutdown())
+            .await
+            .expect("worker shutdown must not hang while a question run owns its workspace");
     }
 }

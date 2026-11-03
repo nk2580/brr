@@ -1,0 +1,15 @@
+# 006: Model-selected interactive responses
+
+Status: Accepted by the user, 2026-11-02.
+
+Intelligent UI is a Brr-owned response format inspired by the [OpenAI product announcement](https://openai.com/index/gpt-6-for-everyone/), not an integration with an undocumented ChatGPT rendering API. The selected ChatGPT-authenticated model may choose plain text, native declarative components, or a self-contained custom app. The owned runtime exposes the reserved `brr_ui_render` tool per turn, enabled for ordinary chats, named-agent chats and task runs. Learning workers, profile interviews and temporary runtime subagents do not receive it. Existing chats gain the capability without changing their saved dynamic catalogs or memory authority.
+
+The [v1 contract](../intelligent-ui-contract.md) defines bounded documents, component identity, state and declared actions. Complete native components can appear as disabled previews from correlated transient argument deltas. Final successful tool history and a host-calculated document hash authorize rendering. Failed, malformed, interrupted and unsupported documents retain their text alternative. Custom source never executes before final validation.
+
+SQLite stores interaction state by thread, call and immutable document hash. Revision checks and an ordered client queue protect input, Reset and action preparation. A different source hash gets separate state. Inline and expanded workspace views share a controller and run at most one custom app instance; inactive or offscreen instances are destroyed. The workspace panel keeps existing browser, terminal, Git and file tabs independent.
+
+Generated apps use a distinct policy from provider-owned MCP Apps. A random loopback origin serves a nonce-protected outer proxy and a separately served opaque inner document. Fixed CSP, iframe permissions and exact frame/origin/capability checks deny networking, external resources, nested frames, navigation, forms, downloads, devices and native APIs. The bridge supports only saved state, declared action requests and sizing. Host state updates synchronize Reset; Stop/Run offers local recovery. This is browser isolation, not a promise of hard CPU isolation for arbitrary JavaScript.
+
+Controls may update local state or prepare a declared agent follow-up. Brr displays the exact prompt and captured inputs for explicit review. A one-time claim checks the document and state revision. Foreground submission uses the normal ChatGPT user-turn path, current collaboration mode and shared submission lock without clearing the draft. Pending questions, approvals and active turns keep Send disabled. Task results route reviewed follow-ups into a new regular conversation with the owning agent and canonical project, never into scheduler-owned execution threads. Task render calls retain their lease guard through validation; successful historical documents remain available after a task retry.
+
+No additional model service, API-key inference, upstream installed CLI fallback or change to existing MCP App permissions is introduced. Runtime changes remain Brr-feature-gated and are recorded in `runtime/UPSTREAM.md`.

@@ -493,6 +493,15 @@ fn validate_dynamic_tools(tools: &[DynamicToolSpec]) -> Result<(), String> {
     Ok(())
 }
 
+fn enable_persistent_dynamic_tool_updates(config: &mut Config) {
+    #[cfg(feature = "brr-runtime")]
+    {
+        config.allow_persistent_dynamic_tool_updates = true;
+    }
+    #[cfg(not(feature = "brr-runtime"))]
+    let _ = config;
+}
+
 #[derive(Clone)]
 pub(crate) struct ThreadRequestProcessor {
     pub(super) auth_manager: Arc<AuthManager>,
@@ -597,6 +606,35 @@ impl ThreadRequestProcessor {
         )
         .await
         .map(|()| None)
+    }
+
+    pub(crate) async fn thread_dynamic_tools_replace(
+        &self,
+        params: codex_app_server_protocol::ThreadDynamicToolsReplaceParams,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        #[cfg(not(feature = "brr-runtime"))]
+        return Err(method_not_found(
+            "thread/dynamicTools/replace is available only in Brr's owned runtime",
+        ));
+
+        #[cfg(feature = "brr-runtime")]
+        {
+            let thread_id = ThreadId::from_string(&params.thread_id)
+                .map_err(|error| invalid_request(format!("invalid thread id: {error}")))?;
+            validate_dynamic_tools(&params.tools).map_err(invalid_request)?;
+            let thread = self
+                .thread_manager
+                .get_thread(thread_id)
+                .await
+                .map_err(|error| core_thread_write_error("replace dynamic tools", error))?;
+            thread
+                .replace_dynamic_tools(params.tools)
+                .await
+                .map_err(|error| core_thread_write_error("replace dynamic tools", error))?;
+            Ok(Some(
+                codex_app_server_protocol::ThreadDynamicToolsReplaceResponse {}.into(),
+            ))
+        }
     }
 
     pub(crate) async fn thread_unsubscribe(
@@ -1529,6 +1567,8 @@ impl ThreadRequestProcessor {
                 .await
                 .map_err(|err| config_load_error(&err))?;
         }
+
+        enable_persistent_dynamic_tool_updates(&mut config);
 
         // Thread config can include project-local warnings absent at initialization.
         let mut config_warnings = config
@@ -4301,6 +4341,8 @@ impl ThreadRequestProcessor {
                     )
                     .await
                     .map_err(|err| config_load_error(&err))?;
+                let mut config = config;
+                enable_persistent_dynamic_tool_updates(&mut config);
                 *prepared_config = Some(PreparedResumeConfig {
                     state: config_state,
                     config,
@@ -4316,6 +4358,7 @@ impl ThreadRequestProcessor {
                 return Ok(ControlFlow::Continue(()));
             }
         };
+        enable_persistent_dynamic_tool_updates(&mut config);
         if clear_reasoning_effort {
             config.model_reasoning_effort = None;
         }
@@ -5291,8 +5334,17 @@ impl ThreadRequestProcessor {
                 "`experimentalPredictionMode` requires `ephemeral: true`",
             ));
         }
+        if params.brr_copy_history && !cfg!(feature = "brr-runtime") {
+            return Err(invalid_request(
+                "brrCopyHistory is available only in Brr's owned runtime",
+            ));
+        }
+        if params.brr_copy_history && params.ephemeral {
+            return Err(invalid_request("brrCopyHistory requires a persistent fork"));
+        }
         let ThreadForkParams {
             thread_id,
+            brr_copy_history,
             experimental_prediction_mode,
             experimental_disable_prediction_mcp,
             last_turn_id,
@@ -5456,24 +5508,25 @@ impl ThreadRequestProcessor {
                 (None, None) => codex_thread_store::ForkBoundary::Latest,
                 (Some(_), Some(_)) => unreachable!("fork boundaries are mutually exclusive"),
             };
-            Some(
-                self.thread_store
-                    .prepare_fork(codex_thread_store::PrepareForkParams {
-                        thread_id: source_thread_id,
-                        boundary,
-                    })
-                    .await
-                    .map_err(|err| match err {
-                        ThreadStoreError::InvalidRequest { message } => invalid_request(message),
-                        ThreadStoreError::ThreadNotFound { thread_id } => {
-                            invalid_request(format!("no rollout found for thread id {thread_id}"))
-                        }
-                        ThreadStoreError::Unsupported { .. } => {
-                            method_not_found("paginated_threads is not supported yet")
-                        }
-                        err => internal_error(format!("failed to prepare paginated fork: {err}")),
-                    })?,
-            )
+            let params = codex_thread_store::PrepareForkParams {
+                thread_id: source_thread_id,
+                boundary,
+            };
+            let prepared = if brr_copy_history {
+                self.thread_store.prepare_fork_for_copy(params).await
+            } else {
+                self.thread_store.prepare_fork(params).await
+            };
+            Some(prepared.map_err(|err| match err {
+                ThreadStoreError::InvalidRequest { message } => invalid_request(message),
+                ThreadStoreError::ThreadNotFound { thread_id } => {
+                    invalid_request(format!("no rollout found for thread id {thread_id}"))
+                }
+                ThreadStoreError::Unsupported { .. } => {
+                    method_not_found("paginated_threads is not supported yet")
+                }
+                err => internal_error(format!("failed to prepare paginated fork: {err}")),
+            })?)
         } else {
             None
         };
@@ -5609,7 +5662,7 @@ impl ThreadRequestProcessor {
             );
         }
         let (inherited_options, inherited_settings) = inherited_fork.unzip();
-        let options = if let Some(options) = inherited_options {
+        let mut options = if let Some(options) = inherited_options {
             *options
         } else {
             // Derive a Config using the same logic as new conversation, honoring overrides if provided.
@@ -5623,6 +5676,7 @@ impl ThreadRequestProcessor {
                 ..StartThreadOptions::new(config)
             }
         };
+        enable_persistent_dynamic_tool_updates(&mut options.config);
         let goals_enabled = options.config.features.enabled(Feature::Goals);
 
         let fallback_model_provider = options.config.model_provider_id.clone();
@@ -5705,9 +5759,15 @@ impl ThreadRequestProcessor {
             ..options
         };
         let new_thread = if let Some(prepared_fork) = prepared_fork {
-            self.thread_manager
-                .fork_prepared_thread(fork_options, prepared_fork)
-                .await
+            if brr_copy_history {
+                self.thread_manager
+                    .fork_prepared_thread_copied(fork_options, prepared_fork)
+                    .await
+            } else {
+                self.thread_manager
+                    .fork_prepared_thread(fork_options, prepared_fork)
+                    .await
+            }
         } else {
             self.thread_manager
                 .fork_thread_from_history(

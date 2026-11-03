@@ -244,6 +244,9 @@ pub struct PreparedFork {
     pub history_base: Option<HistoryPosition>,
     /// Bounded model context selected by the requested fork boundary.
     pub model_context: Arc<Vec<RolloutItem>>,
+    /// Complete selected physical history for copies that must remain readable without ancestry.
+    /// This can be larger than `model_context`, which is intentionally bounded by compaction.
+    pub copied_history: Option<Arc<Vec<RolloutItem>>>,
     /// Blocks source deletion until the child's history reference is durable.
     _source_reservation: Box<dyn std::fmt::Debug + Send>,
 }
@@ -260,8 +263,15 @@ impl PreparedFork {
             source_thread_id,
             history_base,
             model_context,
+            copied_history: None,
             _source_reservation: Box::new(source_reservation),
         }
+    }
+
+    /// Attaches the complete selected physical prefix for a durable copied fork.
+    pub fn with_copied_history(mut self, copied_history: Vec<RolloutItem>) -> Self {
+        self.copied_history = Some(Arc::new(copied_history));
+        self
     }
 }
 

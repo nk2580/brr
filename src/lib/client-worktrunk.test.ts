@@ -14,11 +14,11 @@ describe('native WorkTrunk client bridge', () => {
     invokeMock.mockResolvedValueOnce({ commands: [{ phase: 'post-create', template: 'pnpm install', approved: true }] })
       .mockResolvedValueOnce({ thread: { id: 'thread-1' } })
 
-    await expect(client.start('/project', 'gpt-6.1-sol', true)).resolves.toEqual({ thread: { id: 'thread-1' } })
+    await expect(client.start('project-1', 'gpt-6.1-sol', true)).resolves.toEqual({ thread: { id: 'thread-1' } })
     expect(invokeMock.mock.calls.map(([, args]) => args)).toEqual([
-      { method: 'brr/worktree/inspect', params: { cwd: '/project' } },
+      { method: 'brr/project/inspect', params: { projectId: 'project-1' } },
       { method: 'thread/start', params: {
-        cwd: '/project', model: 'gpt-6.1-sol', modelProvider: 'openai', approvalPolicy: 'on-request', sandbox: 'read-only',
+        projectId: 'project-1', model: 'gpt-6.1-sol', modelProvider: 'openai', approvalPolicy: 'on-request', sandbox: 'read-only',
       } },
     ])
   })
@@ -30,8 +30,8 @@ describe('native WorkTrunk client bridge', () => {
     ]
     invokeMock.mockResolvedValue({ commands })
 
-    await expect(client.start('/project', 'gpt-6.1-sol', false)).rejects.toMatchObject({
-      name: 'WorktreeSetupRequired', kind: 'worktreeSetupRequired', cwd: '/project', commands,
+    await expect(client.start('project-1', 'gpt-6.1-sol', false)).rejects.toMatchObject({
+      name: 'WorktreeSetupRequired', kind: 'worktreeSetupRequired', projectId: 'project-1', commands,
     })
     expect(invokeMock).toHaveBeenCalledTimes(1)
     expect(invokeMock).not.toHaveBeenCalledWith('engine_request', expect.objectContaining({ method: 'thread/start' }))
@@ -40,9 +40,9 @@ describe('native WorkTrunk client bridge', () => {
   it('propagates inspection failures without attempting thread creation', async () => {
     invokeMock.mockRejectedValueOnce(new Error('WorkTrunk is unavailable'))
 
-    await expect(client.start('/project', 'gpt-6.1-sol', false)).rejects.toThrow('WorkTrunk is unavailable')
+    await expect(client.start('project-1', 'gpt-6.1-sol', false)).rejects.toThrow('WorkTrunk is unavailable')
     expect(invokeMock).toHaveBeenCalledTimes(1)
-    expect(invokeMock.mock.calls[0][1].method).toBe('brr/worktree/inspect')
+    expect(invokeMock.mock.calls[0][1].method).toBe('brr/project/inspect')
   })
 
   it('sends only the explicitly approved command templates for the selected project', async () => {

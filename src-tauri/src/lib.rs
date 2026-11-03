@@ -2,10 +2,29 @@ mod agent_host;
 mod agent_protocol;
 mod agent_workers;
 mod bridge;
+mod chat_branch;
+mod chat_fork;
+mod chat_service;
+mod chat_state;
 mod external_url;
+mod generated_ui_sandbox;
+mod intelligent_ui;
 mod mcp_sandbox;
 mod policy;
+mod project_archive;
+mod project_files;
+mod projects;
+mod questions;
+mod task_workspaces;
+mod tickets;
+mod workspace_bridge;
+mod workspace_browser;
+mod workspace_tools;
 mod worktrees;
+
+#[cfg(test)]
+#[path = "chat_project_reference_tests.rs"]
+mod chat_project_reference_tests;
 
 use bridge::Engine;
 use serde_json::{json, Value};
@@ -15,6 +34,27 @@ use tokio::sync::Mutex;
 
 #[derive(Default)]
 struct Runtime(Mutex<Option<Arc<Engine>>>);
+
+#[derive(Default)]
+struct TicketStores(
+    tokio::sync::Mutex<Option<(brr_agent_core::AgentStore, projects::ProjectStore)>>,
+);
+
+impl TicketStores {
+    async fn ensure(
+        &self,
+        app: &tauri::AppHandle,
+    ) -> Result<(brr_agent_core::AgentStore, projects::ProjectStore), String> {
+        let mut stores = self.0.lock().await;
+        if stores.is_none() {
+            let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
+            let agent = brr_agent_core::AgentStore::open(app_data.join("engine/agents")).await?;
+            let projects = projects::ProjectStore::open(app_data.join("projects.sqlite")).await?;
+            *stores = Some((agent, projects));
+        }
+        Ok(stores.as_ref().unwrap().clone())
+    }
+}
 
 #[cfg(test)]
 mod runtime_tests {
@@ -147,7 +187,11 @@ fn runtime_command(home: &std::path::Path) -> Result<tokio::process::Command, St
 }
 
 #[tauri::command]
-async fn engine_connect(app: tauri::AppHandle, runtime: State<'_, Runtime>) -> Result<(), String> {
+async fn engine_connect(
+    app: tauri::AppHandle,
+    runtime: State<'_, Runtime>,
+    stores: State<'_, TicketStores>,
+) -> Result<(), String> {
     let mut slot = runtime.0.lock().await;
     if slot.as_ref().is_some_and(|engine| engine.is_alive()) {
         return Ok(());
@@ -164,12 +208,18 @@ async fn engine_connect(app: tauri::AppHandle, runtime: State<'_, Runtime>) -> R
         std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700))
             .map_err(|e| e.to_string())?;
     }
+    let browser_handler = workspace_bridge::browser_handler(app.clone());
+    let (agent_store, project_store) = stores.ensure(&app).await?;
     let events = Arc::new(move |message: Value| {
         let _ = app.emit("engine-event", message);
     });
     *slot = Some(Arc::new(
-        Engine::connect(runtime_command(&home)?, events).await?,
+        Engine::connect_with_stores(runtime_command(&home)?, events, agent_store, project_store)
+            .await?,
     ));
+    if let Some(engine) = slot.as_ref() {
+        engine.set_browser_handler(browser_handler);
+    }
     Ok(())
 }
 
@@ -192,6 +242,52 @@ async fn engine_request(
 }
 
 #[tauri::command]
+async fn chat_request(
+    view: tauri::Webview,
+    runtime: State<'_, Runtime>,
+    method: String,
+    params: Value,
+) -> Result<Value, String> {
+    let url = view.url().map_err(|e| e.to_string())?;
+    let local = (url.scheme() == "tauri" && url.host_str() == Some("localhost"))
+        || (matches!(url.scheme(), "http" | "https") && url.host_str() == Some("tauri.localhost"))
+        || (cfg!(debug_assertions)
+            && matches!(url.host_str(), Some("localhost" | "127.0.0.1"))
+            && url.port() == Some(1420));
+    if view.label() != "main" || !local {
+        return Err("Chat controls are available only in Brr's main view".into());
+    }
+    engine(&runtime)
+        .await?
+        .agents
+        .chat_request(&method, params)
+        .await
+}
+
+#[tauri::command]
+async fn intelligent_ui_request(
+    view: tauri::Webview,
+    runtime: State<'_, Runtime>,
+    method: String,
+    params: Value,
+) -> Result<Value, String> {
+    let url = view.url().map_err(|e| e.to_string())?;
+    let local = (url.scheme() == "tauri" && url.host_str() == Some("localhost"))
+        || (matches!(url.scheme(), "http" | "https") && url.host_str() == Some("tauri.localhost"))
+        || (cfg!(debug_assertions)
+            && matches!(url.scheme(), "http" | "https")
+            && matches!(url.host_str(), Some("localhost" | "127.0.0.1"))
+            && url.port() == Some(1420));
+    if view.label() != "main" || !local {
+        return Err("Intelligent UI is available only in the Brr application view".into());
+    }
+    engine(&runtime)
+        .await?
+        .intelligent_ui_request(&method, params)
+        .await
+}
+
+#[tauri::command]
 async fn agents_request(
     runtime: State<'_, Runtime>,
     method: String,
@@ -200,6 +296,58 @@ async fn agents_request(
     engine(&runtime)
         .await?
         .agents_request(&method, params)
+        .await
+}
+
+#[tauri::command]
+async fn tickets_request(
+    view: tauri::Webview,
+    runtime: State<'_, Runtime>,
+    app: tauri::AppHandle,
+    stores: State<'_, TicketStores>,
+    method: String,
+    params: Value,
+) -> Result<Value, String> {
+    let url = view.url().map_err(|e| e.to_string())?;
+    let local = (url.scheme() == "tauri" && url.host_str() == Some("localhost"))
+        || (matches!(url.scheme(), "http" | "https") && url.host_str() == Some("tauri.localhost"))
+        || (cfg!(debug_assertions)
+            && matches!(url.scheme(), "http" | "https")
+            && matches!(url.host_str(), Some("localhost" | "127.0.0.1"))
+            && url.port() == Some(1420));
+    if view.label() != "main" || !local {
+        return Err("Tickets are available only in the Brr application view".into());
+    }
+    let (agent_store, project_store) = stores.ensure(&app).await?;
+    let connected = runtime.0.lock().await.clone();
+    if matches!(method.as_str(), "approveRun") {
+        return connected
+            .ok_or("Connect the coding runtime first")?
+            .tickets_request(&method, params)
+            .await;
+    }
+    let response =
+        crate::tickets::request_stores(&agent_store, &project_store, &method, params).await?;
+    if matches!(
+        method.as_str(),
+        "create" | "update" | "move" | "comment" | "proposeRun" | "approveRun" | "rejectRun"
+    ) {
+        let _ = app.emit(
+            "engine-event",
+            json!({"method":"brr/tickets/changed","params":{}}),
+        );
+    }
+    Ok(response)
+}
+
+#[tauri::command]
+async fn archive_project_chats(
+    runtime: State<'_, Runtime>,
+    project_id: String,
+) -> Result<project_archive::ArchiveReport, String> {
+    engine(&runtime)
+        .await?
+        .archive_project_chats(&project_id)
         .await
 }
 
@@ -273,7 +421,10 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(Runtime::default())
+        .manage(TicketStores::default())
         .manage(mcp_sandbox::SandboxManager::default())
+        .manage(workspace_tools::WorkspaceTools::default())
+        .manage(workspace_browser::BrowserManager::default())
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
@@ -283,10 +434,22 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             engine_connect,
             engine_request,
+            chat_request,
+            intelligent_ui_request,
+            workspace_bridge::workspace_request,
+            workspace_bridge::workspace_browser_request,
             agents_request,
+            tickets_request,
             engine_respond,
             chatgpt_login,
             open_external_url,
+            project_files::reveal_project_folder,
+            projects::list_projects,
+            projects::save_project,
+            projects::create_project,
+            projects::move_chat_to_project,
+            projects::delete_project,
+            archive_project_chats,
             mcp_sandbox::create_mcp_sandbox,
             mcp_sandbox::destroy_mcp_sandbox
         ])
@@ -301,6 +464,9 @@ pub fn run() {
                 }
             }
             if matches!(event, tauri::RunEvent::Exit) {
+                app.state::<workspace_tools::WorkspaceTools>().shutdown();
+                app.state::<workspace_browser::BrowserManager>()
+                    .shutdown(app);
                 let runtime = app.state::<Runtime>();
                 tauri::async_runtime::block_on(async {
                     if let Some(engine) = runtime.0.lock().await.take() {

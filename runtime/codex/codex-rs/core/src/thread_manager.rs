@@ -1768,6 +1768,39 @@ impl ThreadManager {
         result
     }
 
+    /// Fork a frozen paginated snapshot by copying its selected history prefix.
+    /// This is reserved for Brr-managed branches that must be independently
+    /// discoverable after restart; ordinary paginated forks remain reference-backed.
+    pub async fn fork_prepared_thread_copied(
+        &self,
+        options: StartThreadOptions,
+        prepared: PreparedFork,
+    ) -> CodexResult<NewThread> {
+        let Some(copied_history) = prepared.copied_history.as_ref() else {
+            return Err(CodexErr::Fatal(
+                "prepared fork is missing its complete copied history".to_string(),
+            ));
+        };
+        let history = InitialHistory::Resumed(ResumedHistory {
+            history_revision: None,
+            conversation_id: prepared.source_thread_id,
+            history: Arc::clone(copied_history),
+            rollout_path: None,
+        });
+        let result = self
+            .fork_thread_with_initial_history(
+                options,
+                ForkHistory {
+                    snapshot: ForkSnapshot::Interrupted,
+                    initial_history: history,
+                    persistence: ForkPersistence::Copied,
+                },
+            )
+            .await;
+        drop(prepared);
+        result
+    }
+
     async fn fork_thread_with_initial_history(
         &self,
         mut options: StartThreadOptions,

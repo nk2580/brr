@@ -1549,6 +1549,17 @@ pub struct AgentMessageDeltaNotification {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
+pub struct BrrUiArgumentsDeltaNotification {
+    pub thread_id: String,
+    pub turn_id: String,
+    pub item_id: String,
+    pub call_id: String,
+    pub delta: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
 /// EXPERIMENTAL - proposed plan streaming deltas for plan items. Clients should
 /// not assume concatenated deltas match the completed plan item content.
 pub struct PlanDeltaNotification {

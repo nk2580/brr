@@ -1333,6 +1333,11 @@ impl MessageProcessor {
                     )
                     .await
             }
+            ClientRequest::ThreadDynamicToolsReplace { params, .. } => {
+                self.thread_processor
+                    .thread_dynamic_tools_replace(params)
+                    .await
+            }
             ClientRequest::ThreadUnsubscribe { params, .. } => {
                 let thread_id = params.thread_id.clone();
                 let response = self

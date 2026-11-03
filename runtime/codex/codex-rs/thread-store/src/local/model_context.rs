@@ -159,6 +159,100 @@ pub(super) async fn load_for_fork(
     }
 }
 
+/// Loads every parsed rollout item in the frozen physical prefix for a durable copied fork.
+/// Unlike model context, this deliberately does not stop at a compaction boundary.
+pub(super) async fn load_full_history_for_fork(
+    lineage: RolloutLineage,
+    history_base: Option<HistoryPosition>,
+    session_meta: RolloutItem,
+) -> ThreadStoreResult<Vec<RolloutItem>> {
+    let Some(history_base) = history_base else {
+        return Ok(vec![session_meta]);
+    };
+    let lineage = lineage.truncate_at(history_base).await?;
+    let (stop, keep_running) = tokio::sync::oneshot::channel::<()>();
+    let scan = tokio::task::spawn_blocking(move || {
+        scan_full_history_from_lineage_blocking(&lineage, session_meta, || stop.is_closed())
+    })
+    .await
+    .map_err(|err| ThreadStoreError::Internal {
+        message: format!("failed to join copied fork history scan: {err}"),
+    })?;
+    drop(keep_running);
+    scan.map_err(|err| ThreadStoreError::Internal {
+        message: format!("failed to scan copied fork history lineage: {err}"),
+    })
+}
+
+fn scan_full_history_from_lineage_blocking(
+    lineage: &RolloutLineage,
+    session_meta: RolloutItem,
+    is_cancelled: impl Fn() -> bool,
+) -> io::Result<Vec<RolloutItem>> {
+    if !matches!(session_meta, RolloutItem::SessionMeta(_)) {
+        return Err(io::Error::other(
+            "copied fork history requires canonical session metadata",
+        ));
+    }
+
+    let mut history = Vec::new();
+    for segment in lineage.segments() {
+        let file = codex_rollout::open_rollout_seekable_reader(
+            segment.rollout_path.as_path(),
+            &is_cancelled,
+        )?;
+        let mut scanner = match segment.end {
+            Some(end) => ReverseJsonlScanner::new_at(file, end.end_byte_offset)?,
+            None => ReverseJsonlScanner::new(file)?,
+        };
+        let mut segment_items = Vec::new();
+        while let Some(outcome) = scanner.scan_next_rollout_line()? {
+            if is_cancelled() {
+                return Err(io::Error::other("copied fork history scan cancelled"));
+            }
+            let line = match outcome {
+                ScanOutcome::Parsed(line) => line,
+                ScanOutcome::Rejected(error) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "failed to parse copied fork history in rollout {}: {error}",
+                            segment.rollout_path.display()
+                        ),
+                    ));
+                }
+            };
+            if matches!(&line.item, RolloutItem::SessionMeta(_)) {
+                break;
+            }
+            let ordinal = line.ordinal.ok_or_else(|| {
+                io::Error::other(format!(
+                    "paginated rollout {} contains an item without an ordinal",
+                    segment.rollout_id
+                ))
+            })?;
+            if ordinal < segment.start_ordinal {
+                break;
+            }
+            if segment
+                .end
+                .is_some_and(|end| ordinal >= end.end_ordinal_exclusive)
+            {
+                return Err(io::Error::other(format!(
+                    "rollout {} contains an item beyond its frozen fork ordinal",
+                    segment.rollout_id
+                )));
+            }
+            segment_items.push(line.item);
+        }
+        segment_items.reverse();
+        history.extend(segment_items);
+    }
+
+    history.insert(0, session_meta);
+    Ok(history)
+}
+
 async fn scan_model_context_from_lineage(
     lineage: RolloutLineage,
     session_meta: SessionMetaLine,

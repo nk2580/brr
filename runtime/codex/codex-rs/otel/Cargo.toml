@@ -9,6 +9,9 @@ doctest = false
 name = "codex_otel"
 path = "src/lib.rs"
 
+[features]
+brr-runtime = ["codex-api/brr-runtime"]
+
 [lints]
 workspace = true
 

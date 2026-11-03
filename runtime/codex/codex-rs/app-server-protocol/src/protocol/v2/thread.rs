@@ -165,6 +165,31 @@ pub struct ThreadStartParams {
     pub experimental_raw_events: bool,
 }
 
+/// Replaces the dynamic tool catalog for an already loaded thread.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS, ExperimentalApi)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadDynamicToolsReplaceParams {
+    pub thread_id: String,
+    #[serde(deserialize_with = "deserialize_required_dynamic_tool_specs")]
+    pub tools: Vec<DynamicToolSpec>,
+}
+
+fn deserialize_required_dynamic_tool_specs<'de, D>(
+    deserializer: D,
+) -> Result<Vec<DynamicToolSpec>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    codex_protocol::dynamic_tools::deserialize_dynamic_tool_specs(deserializer)?
+        .ok_or_else(|| serde::de::Error::missing_field("tools"))
+}
+
+#[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadDynamicToolsReplaceResponse {}
+
 #[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
@@ -543,6 +568,12 @@ impl From<ThreadTurnsListResponse> for TurnsPage {
 /// Prefer using thread_id whenever possible.
 pub struct ThreadForkParams {
     pub thread_id: String,
+
+    /// Brr host-only option: materialize the selected paginated history prefix
+    /// into the new rollout so the fork remains independently discoverable.
+    #[experimental("thread/fork.brrCopyHistory")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub brr_copy_history: bool,
 
     /// Start from the loaded parent's effective config, tools, environments, and
     /// persisted history to maximize prompt-cache reuse. Requires a loaded,

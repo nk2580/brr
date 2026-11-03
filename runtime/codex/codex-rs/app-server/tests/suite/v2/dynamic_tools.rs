@@ -32,6 +32,8 @@ use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ImageReference;
 use codex_protocol::openai_models::InputModality;
+use codex_rollout::InitialHistory;
+use codex_rollout::RolloutItem;
 use core_test_support::load_default_config_for_test;
 use core_test_support::responses;
 use pretty_assertions::assert_eq;
@@ -171,6 +173,139 @@ async fn thread_start_normalizes_legacy_dynamic_tools_into_model_request() -> Re
         })
     );
 
+    Ok(())
+}
+
+#[cfg(feature = "brr-runtime")]
+#[tokio::test]
+async fn dynamic_tools_replace_updates_a_loaded_persistent_thread() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_auto_env()
+        .build()
+        .await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+
+    let start = mcp
+        .send_raw_request("thread/start", Some(json!({})))
+        .await?;
+    let started: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(start)),
+    )
+    .await??;
+    let ThreadStartResponse { thread, .. } = to_response::<ThreadStartResponse>(started)?;
+
+    let missing = mcp
+        .send_raw_request(
+            "thread/dynamicTools/replace",
+            Some(json!({"threadId":"00000000-0000-0000-0000-000000000000","tools":[]})),
+        )
+        .await?;
+    let missing = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(missing)),
+    )
+    .await??;
+    assert!(missing.error.message.contains("thread"));
+
+    let invalid = mcp
+        .send_raw_request(
+            "thread/dynamicTools/replace",
+            Some(json!({"threadId":thread.id,"tools":[{"type":"function","name":"bad name","description":"Bad","inputSchema":{"type":"object"}}]})),
+        )
+        .await?;
+    let invalid = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(invalid)),
+    )
+    .await??;
+    assert!(invalid.error.message.contains("dynamic tool"));
+
+    let replacement = json!([{
+        "type":"function",
+        "name":"brr_browser",
+        "description":"Search the open browser tab",
+        "inputSchema":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"],"additionalProperties":false}
+    }]);
+    let replace = mcp
+        .send_raw_request(
+            "thread/dynamicTools/replace",
+            Some(json!({"threadId":thread.id,"tools":replacement})),
+        )
+        .await?;
+    let replaced: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(replace)),
+    )
+    .await??;
+    assert_eq!(replaced.result, json!({}));
+
+    let rollout_path = thread.path.as_ref().context("thread path missing")?;
+    let history = codex_core::RolloutRecorder::get_rollout_history(rollout_path).await?;
+    let InitialHistory::Resumed(history) = history else {
+        panic!("expected persistent rollout history");
+    };
+    let last_catalog = history
+        .history
+        .iter()
+        .rev()
+        .find_map(|item| match item {
+            RolloutItem::DynamicToolsUpdated { tools, .. } => Some(tools),
+            _ => None,
+        })
+        .context("dynamic tools replacement was not persisted")?;
+    assert_eq!(last_catalog.len(), 1);
+    assert!(
+        matches!(&last_catalog[0], DynamicToolSpec::Function(tool) if tool.name == "brr_browser")
+    );
+    Ok(())
+}
+
+#[cfg(feature = "brr-runtime")]
+#[tokio::test]
+async fn dynamic_tools_replace_is_enabled_on_persistent_forks() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_auto_env()
+        .build()
+        .await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+
+    let start = mcp.send_raw_request("thread/start", Some(json!({}))).await?;
+    let started: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(start)),
+    )
+    .await??;
+    let ThreadStartResponse { thread, .. } = to_response::<ThreadStartResponse>(started)?;
+
+    let fork = mcp
+        .send_raw_request("thread/fork", Some(json!({"threadId":thread.id})))
+        .await?;
+    let forked: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(fork)),
+    )
+    .await??;
+    let forked_id = forked.result["thread"]["id"]
+        .as_str()
+        .context("forked thread ID missing")?;
+
+    let replace = mcp
+        .send_raw_request(
+            "thread/dynamicTools/replace",
+            Some(json!({"threadId":forked_id,"tools":[]})),
+        )
+        .await?;
+    let replaced: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(replace)),
+    )
+    .await??;
+    assert_eq!(replaced.result, json!({}));
     Ok(())
 }
 

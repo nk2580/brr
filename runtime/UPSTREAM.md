@@ -17,6 +17,8 @@ Maintained source changes:
 
 - `app-server/src/brr_main.rs` provides Brr's stdio entrypoint and immutable startup policy, and retains upstream's compiler recursion limit of 256 for optimized builds.
 - `app-server/src/request_processors/account_processor.rs` rejects unsupported login modes before starting login.
+- `app-server-protocol/src/protocol/{common.rs,v2/thread.rs}` and `app-server/src/{message_processor.rs,request_processors/thread_processor.rs}` add the experimental `thread/dynamicTools/replace` host operation for replacing a loaded thread's validated tool catalog. Brr runtime feature enables persistence on thread start, cold resume, and history fork so the existing core update path stores catalogs for later readers; non-Brr app-server behavior remains disabled. App-server integration coverage includes missing-thread and invalid-schema rejection, rollout persistence, and replacement on a forked persistent thread.
+- Brr's persistent paginated chat branches pass the host-only experimental `thread/fork.brrCopyHistory` option. `core/src/thread_manager.rs` and `thread-store/src/{store.rs,types.rs,local/mod.rs,local/paginated_fork.rs}` materialize the frozen selected history prefix into a self-contained branch rollout while retaining bounded startup model context. The source reservation spans materialization; lineage byte/ordinal cutoffs include pre-compaction history, reject malformed records and observe cancellation. This prevents reference-only children disappearing from cold-start thread discovery. Empty forks have no history base. Ordinary paginated forks retain their reference-backed behavior. The option is accepted only by the Brr feature for persistent forks; the desktop renderer cannot supply fork configuration.
 - `app-server/src/request_processors/turn_processor.rs` requires managed ChatGPT authentication before model input.
 - `app-server/src/config_manager.rs` checks authentication and provider for retained input paths.
 - `core/src/config/mod.rs` validates inference endpoints and selects the built-in OpenAI route and ChatGPT login policy.
@@ -24,6 +26,8 @@ Maintained source changes:
 - `core/tests/suite/code_mode.rs` covers interruption during foreground exec and a nested stdin poll, then checks that each shell command cannot write afterward.
 - The app-server/core manifests wire the Brr feature and the standalone policy crate under `brr/policy`.
 - `brr/policy/src/lib.rs` enables upstream plugin loading, MCP 2026-07-28 for ordinary and hosted connections, automatic local stdio protocol discovery through connection sharing, and tool catalog change handling. The desktop separately negotiates the MCP Apps HTML profile and supported form extensions through app-server initialization. Tasks, Skills-over-MCP, sampling, roots and native device-verification capabilities are not advertised.
+- `core/src/tools/{spec_plan.rs,handlers/request_user_input*.rs}` exposes the existing synchronous and asynchronous user-question tools to Brr root threads in Default and Plan modes, keeps synchronous requests blocking in both modes, permits custom text answers, and validates one to three questions. Brr async questions use the bundled schema independently of model catalog entries; a handler guard rejects native temporary subagents. Accepted waiting answers emit a persisted `functionCallOutput` with the original call ID and exact answer payload so the host can distinguish acceptance from request cancellation. These changes are feature-gated and upstream behavior remains unchanged without `brr-runtime`.
+- `config/src/config_toml.rs`, `core/src/config.schema.json` and `core/src/config/{mod.rs,config_tests.rs}` add the host-set `tools.brr_ui.enabled` gate (default off). `core/src/tools/spec_plan.rs` registers the fixed `brr_ui_render` dynamic-tool transport only for enabled root sessions, filters catalog collisions, and describes the native component vocabulary, sandbox app helpers and accessible fallback. `codex-api/src/{common.rs,sse/responses.rs}` parses function-argument deltas only with `brr-runtime`; `core/src/session/turn.rs`, `protocol/src/protocol.rs`, `rollout/src/policy.rs`, `rollout-trace/src/protocol_event.rs`, `app-server-protocol/src/protocol/{common.rs,event_mapping.rs,v2/item.rs}`, `app-server/src/{bespoke_event_handling.rs,notification_media.rs}`, and `otel/{Cargo.toml,src/events/session_telemetry.rs}` map bounded, item/call-associated deltas to `brr/ui/argumentsDelta` without persisting the preview stream. Final `dynamicToolCall` responses remain authoritative.
 - `app-server-protocol/src/protocol/{common.rs,v2/mcp.rs}`, `app-server/src/{message_processor.rs,request_processors.rs,request_processors/mcp_processor.rs}` expose `mcpServer/prompts/list`, `mcpServer/prompt/get`, and `mcpServer/completion/complete`. Results preserve MCP payloads and extension fields; operations reply asynchronously so input requests can be answered while a prompt request is pending.
 - `codex-mcp/src/{lib.rs,mcp/mod.rs,connection_manager/resources.rs,resource_client.rs,runtime.rs,rmcp_client/managed_client.rs}` and `core/src/{codex_thread.rs,session/mod.rs}` carry prompt/completion operations through the existing connection, thread authority, OAuth and lease machinery.
 - `rmcp-client/src/{rmcp_client.rs,request_input.rs,tool_input_tests.rs}` implement typed prompt retrieval with the existing multi-round input loop and regression coverage for original arguments, opaque request state and fresh continuation request IDs.
@@ -47,3 +51,28 @@ The build also compiles the fork's `codex-code-mode-host` helper and stages it b
 `scripts/runtime-artifacts.mjs` fetches V8 artifacts from the upstream OpenAI release and verifies each file against `codex/third_party/v8/rusty_v8_152_2_0.sha256`, including cached files. These replace the default V8 download route for this source snapshot. The build selects the installed stable Rust toolchain and disables incremental compilation and development debug symbols to bound disk use.
 
 The macOS bundle uses `src-tauri/Entitlements.plist`, matching `codex/.github/scripts/macos-signing/codex-code-mode-host.entitlements.plist`. Hardened runtime remains enabled when signing. Verify the packaged helper with `node scripts/smoke-code-host.mjs '<Brr.app>/Contents/MacOS/codex-code-mode-host'` after signing.
+
+Local project ticketing extends the application-owned `runtime/brr/agents` crate and desktop host, using the existing dynamic-tool protocol. Its seven project/ticket tools, reviewed execution snapshots, SQLite records and lifecycle integration require no additional upstream source-fork patch. Ticket execution retains managed ChatGPT authentication and the owned runtime; see `docs/adr/007-local-ticketing.md` and `projects/tickets` for contracts and verification.
+
+Conversation-first chat isolates Brr-managed originals from host state. Under the
+`brr-runtime` feature, `app-server/src/request_processors/brr_chat_permissions.rs`
+is applied by `turn_processor.rs` before model input. It preserves the managed
+profile, workspace permissions and network policy; denies the app-owned chat
+registry/blob subtree; and grants read-only access to the current runtime thread’s
+staged originals. Reapplying the profile strips the source thread’s grants on a
+history fork. Unmanaged profiles are rejected. The host controls staging and fork
+configuration; the renderer supplies opaque attachment IDs only.
+
+`runtime/brr/chat-permission-tests` compiles the actual permission helper and
+upstream Seatbelt generator. Its two matcher tests and macOS process test verify
+selected-file reading, foreign-thread/database denial and staging write denial.
+The OS test requires an execution environment that permits `sandbox-exec`; an
+outer sandbox can reject nested sandbox application before the command starts.
+See that crate's README and verification record for the offline command and
+the tested macOS arm64 result. This is separate from packaged UI/provider QA.
+
+This release targets packaged macOS verification. Other platforms are unverified.
+Linux’s current Bubblewrap mount ordering does not reopen a read-only child below
+a denied parent; attachment access on Linux requires that adapter follow-up before
+being claimed supported. No cross-platform enforcement claim follows from the
+pure permission matcher tests.

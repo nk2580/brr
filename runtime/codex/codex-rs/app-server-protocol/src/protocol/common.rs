@@ -564,6 +564,12 @@ client_request_definitions! {
         serialization: thread_or_path(params.thread_id, params.path),
         response: v2::ThreadResumeResponse,
     },
+    #[experimental("thread/dynamicTools/replace")]
+    ThreadDynamicToolsReplace => "thread/dynamicTools/replace" {
+        params: v2::ThreadDynamicToolsReplaceParams,
+        serialization: thread_id(params.thread_id),
+        response: v2::ThreadDynamicToolsReplaceResponse,
+    },
     ThreadFork => "thread/fork" {
         params: v2::ThreadForkParams,
         inspect_params: true,
@@ -2076,6 +2082,7 @@ server_notification_definitions! {
     /// This event is internal-only. Used by clients that need exact upstream usage.
     RawResponseCompleted => "rawResponse/completed" (v2::RawResponseCompletedNotification),
     AgentMessageDelta => "item/agentMessage/delta" (v2::AgentMessageDeltaNotification),
+    BrrUiArgumentsDelta => "brr/ui/argumentsDelta" (v2::BrrUiArgumentsDeltaNotification),
     /// EXPERIMENTAL - proposed plan streaming deltas for plan items.
     PlanDelta => "item/plan/delta" (v2::PlanDeltaNotification),
     /// Stream base64-encoded stdout/stderr chunks for a running `command/exec` session.

@@ -8,6 +8,13 @@ pub fn validate_request(method: &str, params: &Value) -> Result<(), String> {
         .ok_or_else(|| "params must be a JSON object".to_string())?;
 
     match method {
+        "brr/project/inspect" => {
+            check_fields(obj, &["projectId"])?;
+            if obj.get("projectId").is_some_and(|value| !value.is_null()) {
+                required_string(obj, "projectId")?;
+            }
+            Ok(())
+        }
         "brr/worktree/inspect" => {
             check_fields(obj, &["cwd"])?;
             required_string(obj, "cwd")
@@ -66,9 +73,13 @@ pub fn validate_request(method: &str, params: &Value) -> Result<(), String> {
         "thread/start" | "thread/resume" => validate_thread_start_or_resume(method, obj),
         "turn/start" => validate_turn_start(obj),
         "turn/steer" => {
-            check_fields(obj, &["threadId", "expectedTurnId", "input"])?;
+            check_fields(
+                obj,
+                &["threadId", "expectedTurnId", "input", "clientUserMessageId"],
+            )?;
             required_string(obj, "threadId")?;
             required_string(obj, "expectedTurnId")?;
+            optional_string(obj, "clientUserMessageId")?;
             validate_text_input(obj)
         }
         "turn/interrupt" => {
@@ -500,6 +511,7 @@ fn validate_thread_start_or_resume(
         &[
             "threadId",
             "cwd",
+            "projectId",
             "model",
             "approvalPolicy",
             "sandbox",
@@ -510,6 +522,12 @@ fn validate_thread_start_or_resume(
         required_string(obj, "threadId")?;
     } else if let Some(id) = obj.get("threadId") {
         nonempty_string_value("threadId", id)?;
+    }
+    if obj.get("projectId").is_some_and(|value| !value.is_null()) {
+        required_string(obj, "projectId")?;
+    }
+    if method == "thread/resume" && obj.contains_key("projectId") {
+        return Err("Resuming uses the saved chat workspace".into());
     }
     for key in ["cwd", "model"] {
         optional_string(obj, key)?;
@@ -535,10 +553,18 @@ fn validate_thread_start_or_resume(
 fn validate_turn_start(obj: &serde_json::Map<String, Value>) -> Result<(), String> {
     check_fields(
         obj,
-        &["threadId", "input", "model", "effort", "collaborationMode"],
+        &[
+            "threadId",
+            "input",
+            "model",
+            "effort",
+            "collaborationMode",
+            "clientUserMessageId",
+        ],
     )?;
     required_string(obj, "threadId")?;
     optional_string(obj, "model")?;
+    optional_string(obj, "clientUserMessageId")?;
     if let Some(effort) = obj.get("effort") {
         if !effort.is_null() && effort.as_str().is_none() {
             return Err("effort must be a string".into());

@@ -4,8 +4,8 @@
   --rail-width: 52px;
   --sidebar-width: 330px;
   --toolbar-height: 35px;
-  --shell-background: oklch(22.88% .0114 254.07);
-  --shell-muted: oklch(59% .012 255);
+  --shell-background: var(--background);
+  --shell-muted: var(--muted);
   display: grid;
   grid-template-columns: var(--rail-width) var(--sidebar-width) minmax(0, 1fr);
   grid-template-rows: var(--toolbar-height) minmax(0, 1fr);
@@ -15,22 +15,25 @@
 }
 .app-shell.sidebar-collapsed { grid-template-columns: var(--rail-width) minmax(0, 1fr); }
 .desktop-toolbar {
+  --toolbar-hover: color-mix(in srgb, var(--toolbar-background), var(--toolbar-foreground) 8%);
   grid-column: 1 / -1;
   grid-row: 1;
   display: flex;
   align-items: center;
   gap: 9px;
   padding: 0 12px 0 88px;
-  color: var(--shell-muted);
+  background: var(--toolbar-background, var(--shell-background));
+  color: var(--toolbar-foreground, var(--shell-muted));
   -webkit-app-region: drag;
 }
 .desktop-history { display: flex; align-items: center; gap: 10px; }
-.desktop-toolbar .ui-button { width: 25px; height: 27px; min-height: 0; border-radius: 5px; color: var(--shell-muted); }
+.desktop-toolbar .ui-button { width: 25px; height: 27px; min-height: 0; border-radius: 5px; color: var(--toolbar-foreground, var(--shell-muted)); }
 .desktop-toolbar .ui-button:disabled { opacity: .4; }
-.desktop-toolbar .ui-button:hover:enabled { background: oklch(100% 0 0 / .06); color: oklch(85% .009 255); }
+.desktop-toolbar .ui-button:hover:enabled { background: var(--toolbar-hover); color: var(--toolbar-foreground, var(--shell-muted)); }
+.desktop-toolbar .ui-button:focus-visible { outline-color: var(--toolbar-foreground, var(--shell-muted)); }
 .main-rail {
   --rail-background: var(--shell-background);
-  --rail-foreground: oklch(82.22% .0137 262.37);
+  --rail-foreground: var(--foreground);
   --rail-hover: color-mix(in srgb, var(--rail-background), var(--rail-foreground) 8%);
   --rail-selected: color-mix(in srgb, var(--rail-background), var(--rail-foreground) 14%);
   grid-column: 1;
@@ -61,24 +64,29 @@
 .main-rail .ui-button:focus-visible { outline-color: var(--rail-foreground); }
 .main-rail .ui-button svg { width: 19px; height: 19px; stroke-width: 1.7; }
 .main-rail .ui-button[aria-label="Home"] svg { fill: currentColor; stroke-width: 2.5; }
-.rail-status { position: absolute; top: 6px; right: 6px; width: 8px; height: 8px; border: 1px solid var(--rail-foreground); border-radius: 50%; background: oklch(68% .16 145); box-shadow: 0 0 0 2px var(--rail-background); }
-.rail-divider { width: 24px; height: 1px; margin: 0 0 1px; background: oklch(100% 0 0 / .08); }
-.main-rail .agent-alert-count { position: absolute; top: 0; right: 0; min-width: 14px; height: 14px; margin: 0; background: oklch(68% .16 145); color: oklch(18% .015 145); border: 0; font-size: 9px; }
-.rail-avatar { display: grid; place-items: center; width: 24px; height: 24px; border-radius: 50%; background: oklch(52% .16 310); color: oklch(98% .005 310); font-size: 9px; }
+.rail-status { position: absolute; top: 6px; right: 6px; width: 8px; height: 8px; border: 1px solid var(--rail-foreground); border-radius: 50%; background: var(--success); box-shadow: 0 0 0 2px var(--rail-background); }
+.rail-divider { width: 24px; height: 1px; margin: 0 0 1px; background: var(--border); }
+.main-rail .agent-alert-count { position: absolute; top: 0; right: 0; min-width: 14px; height: 14px; margin: 0; background: var(--danger-background); color: var(--danger); border: 0; font-size: 9px; }
+.rail-avatar { display: grid; place-items: center; width: 24px; height: 24px; border-radius: 50%; background: var(--accent); color: var(--accent-foreground); font-size: 9px; }
 .rail-control { position: relative; display: inline-flex; flex: none; width: 36px; height: 36px; }
-.rail-tooltip { position: absolute; left: calc(100% + 10px); top: 50%; z-index: 80; transform: translateY(-50%); padding: 6px 9px; border: 1px solid oklch(100% 0 0 / .1); border-radius: 6px; background: oklch(28% .01 255); color: oklch(94% .005 255); box-shadow: 0 3px 12px oklch(8% .01 255 / .25); font: 12px/1.4 -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; white-space: nowrap; pointer-events: none; }
-.profile-menu { position: absolute; z-index: 90; left: calc(var(--rail-width) + 6px); bottom: 54px; width: 260px; padding: 12px; border: 1px solid oklch(100% 0 0 / .1); border-radius: 12px; background: oklch(23% .01 255); color: var(--foreground); box-shadow: 0 8px 30px oklch(8% .01 255 / .35); }
-.profile-menu > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.profile-menu > header > strong { font-size: 13px; font-weight: 550; }
-.profile-menu > header > .ui-button { width: 28px; height: 28px; }
-.profile-email { margin: 6px 0 14px; overflow-wrap: anywhere; color: var(--muted); font-size: 12px; }
-.profile-menu > .ui-button { width: 100%; justify-content: flex-start; font-size: 12px; }
+.rail-tooltip { position: absolute; left: calc(100% + 10px); top: 50%; z-index: 80; transform: translateY(-50%); padding: 6px 9px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-high); color: var(--foreground); box-shadow: var(--shadow); font: 12px/1.4 var(--font-ui); white-space: nowrap; pointer-events: none; }
+.app-shell[data-section="profile"] .main-panel,
+.app-shell[data-section="tickets"] .main-panel { grid-column: 2 / -1; }
+.profile-page { flex: 1; min-width: 0; min-height: 0; overflow-y: auto; padding: 28px 40px 48px; color: var(--foreground); font-family: var(--font-ui); }
+.profile-page-header { display: flex; align-items: center; justify-content: space-between; gap: 24px; max-width: 720px; }
+.profile-page-header h1 { margin: 0; font-size: 24px; font-weight: 600; letter-spacing: -.025em; }
+.profile-page-header > .ui-button { width: 36px; height: 36px; }
+.profile-account { max-width: 520px; margin-top: 28px; padding-top: 20px; border-top: 1px solid var(--border); }
+.profile-account h2 { margin: 0 0 10px; font-size: 14px; font-weight: 550; }
+.profile-email { margin: 0 0 16px; overflow-wrap: anywhere; color: var(--muted); font-size: 13px; }
+.profile-account > .ui-button { justify-content: flex-start; min-height: 32px; padding-inline: 10px; font-size: 12px; }
+.profile-page :focus-visible { outline-color: var(--focus); }
 .sidebar {
-  --sidebar-background: oklch(19.53% .013 264.21);
-  --sidebar-foreground: oklch(82.22% .0137 262.37);
-  --sidebar-hover: color-mix(in srgb, var(--sidebar-background), var(--sidebar-foreground) 8%);
-  --sidebar-selected: color-mix(in srgb, var(--sidebar-background), var(--sidebar-foreground) 10%);
-  --sidebar-border: color-mix(in srgb, var(--sidebar-background), var(--sidebar-foreground) 12%);
+  --sidebar-background: var(--surface);
+  --sidebar-foreground: var(--foreground);
+  --sidebar-hover: var(--surface-hover);
+  --sidebar-selected: var(--surface-selected);
+  --sidebar-border: var(--border);
   grid-column: 2;
   grid-row: 2;
   display: flex;
@@ -91,48 +99,53 @@
   border-radius: 14px 0 0 14px;
   background: var(--sidebar-background);
   color: var(--sidebar-foreground);
-  font-family: ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace;
+  font-family: var(--font-ui);
 }
 .sidebar[hidden] { display: none; }
 .sidebar-header { display: flex; align-items: center; gap: 8px; height: 51px; min-height: 51px; padding: 0 8px; }
-.wordmark { min-width: 0; font: 600 20px/1.2 -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; letter-spacing: -.4px; }
+.wordmark { min-width: 0; font: 750 20px/1.2 var(--font-ui); letter-spacing: -.4px; }
 .wordmark-dot { color: inherit; }
 .sidebar-header > .ui-button { margin-left: auto; }
 .sidebar .ui-button { background: transparent; color: inherit; }
 .sidebar .ui-button:hover:enabled { background: var(--sidebar-hover); color: inherit; }
 .sidebar .ui-button[aria-pressed="true"] { background: var(--sidebar-selected); }
 .sidebar-actions { display: grid; gap: 0; padding: 0 0 6px; }
-.sidebar-actions > .ui-button { justify-content: flex-start; gap: 9px; width: 100%; min-height: 31px; padding: 5px 8px; font: inherit; font-size: 16px; font-weight: 400; }
+.sidebar-actions > .ui-button { justify-content: flex-start; gap: 9px; width: 100%; min-height: 31px; padding: 5px 8px; font: inherit; font-size: 14px; font-weight: 400; }
 .sidebar-actions svg { width: 16px; height: 16px; flex: none; stroke-width: 1.6; }
 .sidebar-scroll { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; padding-bottom: 14px; }
 .sidebar-section { margin-top: 19px; }
-.sidebar-section-title { margin: 0 0 9px; padding: 0 8px; font-size: 16px; line-height: 22px; font-weight: 400; color: inherit; opacity: .6; }
-.project-row { display: flex; align-items: center; gap: 9px; width: 100%; min-height: 31px; padding: 5px 8px; border: 0; border-radius: 11px; background: transparent; color: inherit; text-align: left; font: inherit; font-size: 16px; }
+.sidebar-section-title { margin: 0 0 9px; padding: 0 8px; font-size: 12px; line-height: 20px; font-weight: 500; color: var(--muted); }
+.project-row { display: flex; align-items: center; gap: 9px; width: 100%; min-height: 31px; padding: 5px 8px; border: 0; border-radius: 11px; background: transparent; color: inherit; text-align: left; font: inherit; font-size: 14px; }
 .project-row:hover, .project-row[aria-expanded="true"] { background: var(--sidebar-selected); }
 .project-row > svg { flex: none; width: 16px; height: 16px; stroke-width: 1.6; }
 .project-row > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.project-row-header { display: flex; align-items: center; gap: 2px; }
+.project-row-header .project-row { flex: 1; min-width: 0; width: auto; }
+.project-load-error { padding: 8px; font-size: 12px; overflow-wrap: anywhere; color: var(--danger); }
 .project-row > .project-chevron { width: 12px; margin-left: auto; opacity: 0; }
 .project-row:hover > .project-chevron, .project-row:focus-visible > .project-chevron { opacity: .7; }
 .project-threads { padding: 2px 0 8px 24px; }
 .thread-list { min-width: 0; }
-.thread-row { display: flex; align-items: center; gap: 7px; width: 100%; min-height: 31px; padding: 5px 8px; border: 0; border-radius: 9px; background: transparent; color: inherit; font: inherit; font-size: 16px; line-height: 21px; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.thread-row { display: flex; align-items: center; gap: 7px; width: 100%; min-height: 31px; padding: 5px 8px; border: 0; border-radius: 9px; background: transparent; color: inherit; font: inherit; font-size: 13px; line-height: 20px; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .thread-row:hover, .thread-row.selected { background: var(--sidebar-hover); }
 .thread-row > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.sidebar-empty { margin: 0; padding: 0 8px; font-size: 12px; line-height: 1.7; opacity: .6; }
-.thread-search { width: calc(100% - 16px); margin: 5px 8px 8px; padding: 8px; border: 1px solid var(--sidebar-border); border-radius: 8px; background: var(--sidebar-hover); color: inherit; font-size: 13px; }
-.thread-search::placeholder { color: inherit; opacity: .6; }
-.account-panel { display: grid; gap: 5px; margin-top: auto; padding: 10px 6px 0; border-top: 1px solid var(--sidebar-border); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
-.account-panel > .ui-button { justify-content: flex-start; min-height: 30px; padding: 5px 6px; font-size: 11px; }
-.account-email { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0 6px; font-size: 10px; opacity: .65; }
-.sidebar .engine-offline { color: inherit; }
-.sidebar :focus-visible { outline-color: var(--sidebar-foreground); }
+.sidebar-empty { margin: 0; padding: 0 8px; font-size: 12px; line-height: 1.7; color: var(--muted); }
+.thread-search { width: calc(100% - 16px); margin: 5px 8px 8px; padding: 8px; border: 1px solid var(--control-border); border-radius: 8px; background: var(--surface-high); color: inherit; font-size: 13px; }
+.thread-search::placeholder { color: var(--muted); }
+.sidebar :focus-visible { outline-color: var(--focus); }
 .sidebar ::selection { background: var(--sidebar-foreground); color: var(--sidebar-background); }
-.sidebar ::-webkit-scrollbar-thumb { background: var(--sidebar-border); }
+.sidebar ::-webkit-scrollbar-thumb { background: var(--border); }
 .main-panel { grid-column: 3; grid-row: 2; display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--background); }
 .app-shell[data-section="agents"] .main-panel, .app-shell[data-section="plugins"] .main-panel { grid-column: 2 / -1; }
+.app-shell.sidebar-collapsed .tickets-project-sidebar { display: none; }
+.app-shell[data-section="tickets"] .main-panel { overflow: hidden; border-top-left-radius: 14px; }
 .sidebar-collapsed .agents-panel, .sidebar-collapsed .extensions-panel { padding-left: 0; }
 .sidebar-collapsed .agents-list, .sidebar-collapsed .extensions-tabs { display: none; }
-.sidebar-collapsed .main-panel { grid-column: 2; border-top: 1px solid oklch(100% 0 0 / .06); border-left: 1px solid oklch(100% 0 0 / .06); border-top-left-radius: 14px; }
+.sidebar-collapsed .main-panel { grid-column: 2; border-top: 1px solid var(--border); border-left: 1px solid var(--border); }
+.app-shell.sidebar-collapsed .main-panel,
+.app-shell[data-section="profile"] .main-panel,
+.app-shell[data-section="agents"] .main-panel,
+.app-shell[data-section="plugins"] .main-panel { overflow: hidden; border-top-left-radius: 14px; }
 .titlebar { display: flex; align-items: center; flex-shrink: 0; height: 51px; min-width: 0; padding: 0 20px; }
 .titlebar-actions { display: flex; align-items: center; gap: 12px; margin-left: auto; }
 .titlebar-actions .ui-button { font-size: 11px; }
@@ -140,7 +153,7 @@
 @media (max-width: 800px) {
   .app-shell { --sidebar-width: 230px; }
   .titlebar { padding-inline: 12px; }
-  .sidebar-actions > .ui-button, .sidebar-section-title, .project-row, .thread-row { font-size: 14px; }
+  .sidebar-actions > .ui-button, .project-row { font-size: 14px; }
   .composer-model-controls { gap: 7px; }
   .model-choice { font-size: 13px; }
   .model-choice .select-wrap { max-width: 104px; }

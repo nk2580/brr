@@ -2373,6 +2373,7 @@ pub(super) fn realtime_text_for_event(msg: &EventMsg) -> Option<RealtimeEventTex
         | EventMsg::HookStarted(_)
         | EventMsg::HookCompleted(_)
         | EventMsg::AgentMessageContentDelta(_)
+        | EventMsg::BrrUiArgumentsDelta(_)
         | EventMsg::PlanDelta(_)
         | EventMsg::ReasoningContentDelta(_)
         | EventMsg::ReasoningRawContentDelta(_)
@@ -2875,6 +2876,8 @@ async fn try_run_sampling_request(
         String,
         Box<dyn ToolArgumentDiffConsumer>,
     )> = None;
+    #[cfg(feature = "brr-runtime")]
+    let mut brr_ui_argument_streams: HashMap<String, (String, usize)> = HashMap::new();
     let mut should_emit_turn_diff = false;
     let mut should_emit_token_count = false;
     const MAX_ANALYTICS_TOOL_CALL_IDS_PER_RESPONSE: usize = 256;
@@ -3022,6 +3025,13 @@ async fn try_run_sampling_request(
                         })
                     });
                 assign_missing_streamed_response_item_id(&mut item, active_item.as_ref());
+                #[cfg(feature = "brr-runtime")]
+                if let ResponseItem::FunctionCall {
+                    id: Some(item_id), ..
+                } = &item
+                {
+                    brr_ui_argument_streams.remove(item_id.as_str());
+                }
                 sess.reserve_assistant_message_order(&turn_context, &item)
                     .await;
                 if analytics_tool_call_ids.len() < MAX_ANALYTICS_TOOL_CALL_IDS_PER_RESPONSE {
@@ -3178,6 +3188,23 @@ async fn try_run_sampling_request(
             }
             ResponseEvent::OutputItemAdded(mut item) => {
                 assign_missing_streamed_response_item_id(&mut item, /*active_item*/ None);
+                #[cfg(feature = "brr-runtime")]
+                if !*draining_for_mailbox
+                    && turn_context.config.brr_ui_enabled
+                    && !turn_context.session_source.is_non_root_agent()
+                    && brr_ui_argument_streams.len() < 256
+                    && let ResponseItem::FunctionCall {
+                        id: Some(item_id),
+                        call_id,
+                        name,
+                        namespace: None,
+                        ..
+                    } = &item
+                    && name == "brr_ui_render"
+                {
+                    brr_ui_argument_streams
+                        .insert(item_id.as_str().to_string(), (call_id.clone(), 0));
+                }
                 sess.reserve_assistant_message_order(&turn_context, &item)
                     .await;
                 if !*draining_for_mailbox
@@ -3326,6 +3353,8 @@ async fn try_run_sampling_request(
                 usage_metadata,
                 end_turn,
             } => {
+                #[cfg(feature = "brr-runtime")]
+                brr_ui_argument_streams.clear();
                 response_completed = true;
                 request_token_usage = token_usage.clone();
                 sess.services
@@ -3425,6 +3454,53 @@ async fn try_run_sampling_request(
                 if let Some(event) = consumer.consume_diff(turn_context.as_ref(), call_id, &delta) {
                     sess.send_event(&turn_context, event).await;
                 }
+            }
+            #[cfg(feature = "brr-runtime")]
+            ResponseEvent::FunctionCallArgumentsDelta {
+                item_id,
+                call_id: event_call_id,
+                delta,
+            } => {
+                const MAX_BRR_UI_ARGUMENT_BYTES: usize = 5 * 1024 * 1024;
+                let Some((call_id, next_byte_count)) =
+                    brr_ui_argument_streams
+                        .get(&item_id)
+                        .map(|(call_id, byte_count)| {
+                            (call_id.clone(), byte_count.checked_add(delta.len()))
+                        })
+                else {
+                    continue;
+                };
+                if event_call_id
+                    .as_deref()
+                    .is_some_and(|event_call_id| event_call_id != call_id)
+                {
+                    continue;
+                }
+                let Some(next_byte_count) = next_byte_count else {
+                    brr_ui_argument_streams.remove(&item_id);
+                    continue;
+                };
+                if next_byte_count > MAX_BRR_UI_ARGUMENT_BYTES {
+                    brr_ui_argument_streams.remove(&item_id);
+                    continue;
+                }
+                if let Some((_, byte_count)) = brr_ui_argument_streams.get_mut(&item_id) {
+                    *byte_count = next_byte_count;
+                }
+                sess.send_event(
+                    &turn_context,
+                    EventMsg::BrrUiArgumentsDelta(
+                        codex_protocol::protocol::BrrUiArgumentsDeltaEvent {
+                            thread_id: sess.thread_id.to_string(),
+                            turn_id: turn_context.sub_id.clone(),
+                            item_id,
+                            call_id,
+                            delta,
+                        },
+                    ),
+                )
+                .await;
             }
             ResponseEvent::ReasoningSummaryDelta {
                 delta,

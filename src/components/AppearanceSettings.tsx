@@ -18,9 +18,9 @@ export function AppearanceSettings({ value, onChange, onClose, saveFailed = fals
         <h2>Appearance</h2>
         <Button type="button" variant="ghost" size="icon" aria-label="Close settings" onClick={onClose}><X size={16} aria-hidden="true" /></Button>
       </header>
-      <p className="appearance-settings-copy">Choose a color for the main icon rail. Collapsible menus keep their dark appearance. Your selection is saved on this device.</p>
+      <p className="appearance-settings-copy">Choose a theme color for the rail, top bar and app accents. Panels keep their dark appearance. Your selection is saved on this device.</p>
       <fieldset>
-        <legend>Rail color</legend>
+        <legend>Theme color</legend>
         <div className="appearance-color-options">
           {SIDEBAR_COLORS.map(color => (
             <label

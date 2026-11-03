@@ -1,3 +1,6 @@
+#[cfg(feature = "brr-runtime")]
+#[path = "brr_chat_permissions.rs"]
+mod brr_chat_permissions;
 use super::thread_input::ensure_direct_input_allowed;
 use super::*;
 use codex_app_server_protocol::ImageReference as V2ImageReference;
@@ -675,7 +678,7 @@ impl TurnRequestProcessor {
                 environment_requests,
             )
             .await;
-        let thread_settings = self
+        let mut thread_settings = self
             .build_thread_settings_overrides(
                 thread.as_ref(),
                 ThreadSettingsBuildParams {
@@ -695,6 +698,18 @@ impl TurnRequestProcessor {
                 },
             )
             .await?;
+
+        #[cfg(feature = "brr-runtime")]
+        {
+            let profile = match thread_settings.permission_profile.take() {
+                Some(profile) => profile,
+                None => thread.restorable_thread_settings().await.permission_profile
+                    .ok_or_else(|| invalid_request("Brr permissions are unavailable"))?,
+            };
+            thread_settings.permission_profile = Some(brr_chat_permissions::scoped_chat_profile(
+                profile, &self.config.codex_home, &params.thread_id,
+            ).map_err(invalid_request)?);
+        }
 
         let submission = thread
             .start_or_steer_turn(

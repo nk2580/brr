@@ -292,6 +292,19 @@ pub trait ThreadStore: Any + Send + Sync {
         })
     }
 
+    /// Prepares a paginated fork with its full selected physical prefix for an opt-in copied fork.
+    /// Stores that do not support durable independent copies should keep the default unsupported.
+    fn prepare_fork_for_copy(
+        &self,
+        _params: PrepareForkParams,
+    ) -> ThreadStoreFuture<'_, PreparedFork> {
+        Box::pin(async {
+            Err(ThreadStoreError::Unsupported {
+                operation: "prepare_fork_for_copy",
+            })
+        })
+    }
+
     /// Reverts a paginated thread's durable history so it ends immediately before
     /// `before_turn_id`.
     ///

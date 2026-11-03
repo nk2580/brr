@@ -407,6 +407,16 @@ pub fn process_responses_event(
                 }));
             }
         }
+        #[cfg(feature = "brr-runtime")]
+        "response.function_call_arguments.delta" => {
+            if let (Some(delta), Some(item_id)) = (event.delta, event.item_id) {
+                return Ok(Some(ResponseEvent::FunctionCallArgumentsDelta {
+                    item_id,
+                    call_id: event.call_id,
+                    delta,
+                }));
+            }
+        }
         "response.reasoning_summary_text.delta" => {
             if let (Some(delta), Some(summary_index)) = (event.delta, event.summary_index) {
                 return Ok(Some(ResponseEvent::ReasoningSummaryDelta {
@@ -539,7 +549,6 @@ pub fn process_responses_event(
         | "response.content_part.added"
         | "response.content_part.done"
         | "response.custom_tool_call_input.done"
-        | "response.function_call_arguments.delta"
         | "response.function_call_arguments.done"
         | "response.in_progress"
         | "response.metadata"
@@ -1016,6 +1025,7 @@ mod tests {
             json!({
                 "type": "response.function_call_arguments.delta",
                 "item_id": "fc_1",
+                "call_id": "call_fc_1",
                 "delta": "{\"input\":\"",
             }),
             json!({
@@ -1033,6 +1043,13 @@ mod tests {
                 delta,
             } if item_id == "ctc_1" && call_id == "call_1" && delta == "*** Begin"
         );
+        #[cfg(feature = "brr-runtime")]
+        assert_matches!(
+            &events[1],
+            ResponseEvent::FunctionCallArgumentsDelta { item_id, call_id, delta }
+                if item_id == "fc_1" && call_id.as_deref() == Some("call_fc_1") && delta == "{\"input\":\""
+        );
+        #[cfg(not(feature = "brr-runtime"))]
         assert_matches!(&events[1], ResponseEvent::Completed { .. });
     }
 

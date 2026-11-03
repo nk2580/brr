@@ -7,6 +7,8 @@ export type RpcEvent = {
 export type AgentItem = {
   id: string;
   type: string;
+  turnId?: string;
+  turnStatus?: string;
   text?: string;
   command?: string;
   aggregatedOutput?: string;
@@ -60,11 +62,11 @@ function upsertItem(items: AgentItem[], item: AgentItem): AgentItem[] {
   );
 }
 
-function mergeItems(items: AgentItem[], incoming: unknown): AgentItem[] {
+function mergeItems(items: AgentItem[], incoming: unknown, turnId?: string, turnStatus?: string): AgentItem[] {
   if (!Array.isArray(incoming)) return items;
   return incoming.reduce<AgentItem[]>((merged, item) => {
     if (!item || typeof item.id !== 'string' || typeof item.type !== 'string') return merged;
-    return upsertItem(merged, item as AgentItem);
+    return upsertItem(merged, { ...item, ...(turnId ? {turnId} : {}), ...(turnStatus ? {turnStatus} : {}) } as AgentItem);
   }, items);
 }
 
@@ -84,12 +86,13 @@ function appendItemText(
   const current = state.items.find((item) => item.id === params.itemId);
   const item: AgentItem = {
     ...(current ?? { id: params.itemId, type }),
+    turnId: params.turnId ?? current?.turnId,
     [field]: `${typeof current?.[field] === 'string' ? current[field] : ''}${params.delta}`,
   };
   return {
     ...state,
     turnId: state.turnId ?? params.turnId ?? null,
-    items: upsertItem(state.items, item),
+    items: upsertItem(state.items, {...item, turnId: params.turnId ?? item.turnId}),
   };
 }
 
@@ -104,7 +107,6 @@ const historyEventMethods = new Set([
   'item/commandExecution/requestApproval',
   'item/fileChange/requestApproval',
   'item/permissions/requestApproval',
-  'item/tool/requestUserInput',
   'serverRequest/resolved',
 ]);
 
@@ -131,7 +133,7 @@ export function reduceSession(state: SessionState, event: RpcEvent): SessionStat
         threadId: state.threadId ?? params.threadId ?? null,
         turnId: params.turn?.id ?? state.turnId,
         status: 'running',
-        items: mergeItems(state.items, params.turn?.items),
+        items: mergeItems(state.items, params.turn?.items, params.turn?.id, params.turn?.status),
         plan: [],
         diff: '',
         error: null,
@@ -142,7 +144,7 @@ export function reduceSession(state: SessionState, event: RpcEvent): SessionStat
       if (state.turnId && turn.id && state.turnId !== turn.id) {
         return {
           ...state,
-          items: mergeItems(state.items, turn.items),
+          items: mergeItems(state.items, turn.items, turn.id, turn.status).map(item => item.turnId === turn.id && typeof turn.status === 'string' ? {...item, turnStatus: turn.status} : item),
           approvals: state.approvals.filter((approval) => approval.params.turnId !== turn.id),
         };
       }
@@ -160,7 +162,8 @@ export function reduceSession(state: SessionState, event: RpcEvent): SessionStat
         ...state,
         turnId: turn.id ?? state.turnId,
         status,
-        items: mergeItems(state.items, turn.items),
+        items: mergeItems(state.items, turn.items, turn.id, turn.status).map((item): AgentItem => item.turnId === turn.id ? {...item, turnStatus: turn.status} : item).map(item => item.tool === 'brr_ui_render' && item.status === 'inProgress'
+          ? {...item, status: status === 'interrupted' ? 'interrupted' : 'failed'} : item),
         proposedPlan: proposedPlanFromItems(turn.items, turn.id ?? state.turnId, true) ?? state.proposedPlan,
         approvals: state.approvals.filter((approval) => approval.params.turnId !== turn.id),
         error: typeof errorMessage === 'string'
@@ -184,9 +187,23 @@ export function reduceSession(state: SessionState, event: RpcEvent): SessionStat
         ...state,
         turnId: isStaleTurn ? state.turnId : eventTurnId ?? state.turnId,
         status: isStaleTurn || isTerminalCurrentTurn ? state.status : 'running',
-        items: upsertItem(state.items, item),
+        items: upsertItem(state.items, {...item, turnId: params.turnId ?? item.turnId}),
         proposedPlan: isStaleTurn ? state.proposedPlan : proposedPlanFromItems([item], eventTurnId ?? state.turnId, event.method === 'item/completed') ?? state.proposedPlan,
       };
+    }
+    case 'brr/ui/argumentsDelta': {
+      if (state.status !== 'running' || params.turnId !== state.turnId || typeof params.callId !== 'string'
+        || typeof params.itemId !== 'string' || typeof params.delta !== 'string') return state;
+      const current = state.items.find(item => item.id === params.callId);
+      if (current && (current.tool !== 'brr_ui_render' || current.status !== 'inProgress'
+        || (current.uiStreamItemId && current.uiStreamItemId !== params.itemId))) return state;
+      const argumentsText = `${typeof current?.argumentsText === 'string' ? current.argumentsText : ''}${params.delta}`;
+      return {...state, items: upsertItem(state.items, {
+        ...(current ?? {id: params.callId, type: 'dynamicToolCall', tool: 'brr_ui_render'}),
+        uiStreamItemId: params.itemId, uiStreamTurnId: params.turnId,
+        argumentsText: argumentsText.length <= 5_000_000 ? argumentsText : '',
+        status: argumentsText.length <= 5_000_000 ? 'inProgress' : 'failed',
+      })};
     }
     case 'item/agentMessage/delta': {
       return appendItemText(state, params, 'agentMessage', 'text');
@@ -246,7 +263,6 @@ export function reduceSession(state: SessionState, event: RpcEvent): SessionStat
         'item/commandExecution/requestApproval',
         'item/fileChange/requestApproval',
         'item/permissions/requestApproval',
-        'item/tool/requestUserInput',
       ]);
       if (!approvalMethods.has(event.method) || event.id === undefined) return state;
       const approval: Approval = {
@@ -274,7 +290,7 @@ export function hydrateThread(thread: { id: string; turns?: any[]; collaboration
   const turns = Array.isArray(thread.turns) ? thread.turns : [];
   const latestTurn = [...turns].reverse().find((turn) => turn.status === 'inProgress')
     ?? turns.at(-1);
-  const historyItems = turns.flatMap((turn) => Array.isArray(turn.items) ? turn.items : [])
+  const historyItems = turns.flatMap((turn) => Array.isArray(turn.items) ? turn.items.map((item: AgentItem) => ({...item, turnId: turn.id, turnStatus: turn.status})) : [])
     .filter((item): item is AgentItem => Boolean(item && typeof item.id === 'string' && typeof item.type === 'string'));
   const session = initialSession(thread.id);
   const error = latestTurn?.error?.message;

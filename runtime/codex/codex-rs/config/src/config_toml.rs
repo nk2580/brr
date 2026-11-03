@@ -713,6 +713,15 @@ pub struct ToolsToml {
     pub web_search: Option<WebSearchToolConfig>,
     pub experimental_request_user_input: Option<ExperimentalRequestUserInput>,
     pub update_plan: Option<UpdatePlanToolConfig>,
+    /// Enables the Brr-owned Intelligent UI renderer for this session.
+    pub brr_ui: Option<BrrUiToolConfig>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct BrrUiToolConfig {
+    #[serde(default)]
+    pub enabled: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema)]

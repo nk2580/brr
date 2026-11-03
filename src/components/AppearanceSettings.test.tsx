@@ -9,7 +9,7 @@ describe('AppearanceSettings', () => {
 
     expect(screen.getByRole('region', { name: 'Application settings' })).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: 'Appearance' })).toBeInTheDocument()
-    expect(screen.getByRole('group', { name: 'Rail color' })).toBeInTheDocument()
+    expect(screen.getByRole('group', { name: 'Theme color' })).toBeInTheDocument()
     const radios = screen.getAllByRole('radio')
     expect(radios).toHaveLength(9)
     expect(radios.map(radio => radio.getAttribute('aria-label'))).toEqual(['Graphite', 'Lime', 'Yellow', 'Orange', 'Red', 'Cyan', 'Blue', 'Violet', 'Pink'])

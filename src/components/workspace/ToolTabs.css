@@ -1,0 +1,36 @@
+.workspace-tool { height: 100%; min-height: 0; display: flex; overflow: hidden; color: var(--foreground); background: var(--background); font: 13px var(--font-ui); }
+.workspace-tool[hidden] { display: none; }
+.workspace-file-tree, .workspace-git-files { display: flex; flex: 0 0 220px; min-width: 150px; flex-direction: column; overflow: auto; border-right: 1px solid var(--border); background: var(--surface); }
+.workspace-tool-heading, .workspace-editor-header, .workspace-diff-toolbar { display: flex; min-height: 40px; align-items: center; gap: 8px; padding: 4px 10px; border-bottom: 1px solid var(--border); color: var(--muted); }
+.workspace-tool-heading { justify-content: space-between; position: sticky; top: 0; background: var(--surface); z-index: 1; }
+.workspace-file-row { display: flex; width: 100%; min-height: 30px; align-items: center; gap: 7px; overflow: hidden; padding: 4px 10px; border: 0; color: var(--foreground); background: transparent; text-align: left; cursor: pointer; }
+.workspace-file-row:hover { background: var(--surface-hover); }
+.workspace-file-row.is-selected { background: var(--surface-selected); outline: 1px solid color-mix(in oklch, var(--accent) 35%, transparent); outline-offset: -1px; }
+.workspace-file-icon, .workspace-git-status { flex: 0 0 14px; color: var(--accent); text-align: center; }
+.workspace-file-editor, .workspace-diff-pane { position: relative; display: flex; flex: 1; min-width: 0; min-height: 0; flex-direction: column; overflow: hidden; }
+.workspace-editor-header { color: var(--foreground); }
+.workspace-path { overflow: hidden; flex: 1; text-overflow: ellipsis; white-space: nowrap; }
+.workspace-dirty { color: var(--warning); }
+.workspace-unsaved-label { padding: 5px 12px; color: var(--warning); background: var(--warning-background); }
+.workspace-editor { flex: 1; width: 100%; min-height: 0; resize: none; border: 0; outline: 0; padding: 12px; color: var(--foreground); background: var(--background); font: 13px/1.55 var(--font-mono); tab-size: 2; }
+.workspace-editor:focus-visible { box-shadow: inset 0 0 0 1px var(--focus); }
+.workspace-empty { padding: 18px; color: var(--muted); }
+.workspace-error, .workspace-warning, .workspace-confirm { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 8px 12px; color: var(--danger); background: var(--danger-background); }
+.workspace-warning { color: var(--warning); background: var(--warning-background); }
+.workspace-confirm { color: var(--foreground); }
+.workspace-switch-confirm { position: absolute; inset: auto 8px 8px; z-index: 3; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface-high); box-shadow: var(--shadow); }
+.workspace-git-files { flex-basis: 245px; }
+.workspace-git-status { color: var(--muted); font: 12px var(--font-mono); }
+.workspace-diff-toolbar { justify-content: space-between; }
+.workspace-stage-toggle { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); white-space: nowrap; }
+.workspace-diff { flex: 1; margin: 0; overflow: auto; padding: 10px 0; color: var(--foreground); background: var(--background); font: 12px/1.5 var(--font-mono); tab-size: 2; }
+.workspace-diff > span { display: block; min-height: 1.5em; padding: 0 12px; white-space: pre; }
+.workspace-diff .diff-add { color: var(--success); background: var(--success-background); }
+.workspace-diff .diff-remove { color: var(--danger); background: var(--danger-background); }
+.workspace-diff .diff-hunk { color: var(--accent); background: var(--surface-high); }
+.terminal-tool { flex-direction: column; padding: 0 8px 8px; }
+.terminal-status { display: flex; min-height: 32px; align-items: center; color: var(--muted); font-size: 12px; }
+.terminal-status [role="alert"] { color: var(--danger); }
+.terminal-host { flex: 1; min-height: 0; overflow: hidden; }
+.terminal-host .xterm { height: 100%; padding: 3px; }
+.terminal-host .xterm-viewport { overscroll-behavior: contain; }

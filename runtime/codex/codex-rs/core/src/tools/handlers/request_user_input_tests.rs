@@ -12,6 +12,8 @@ use crate::tools::context::ToolPayload;
 use crate::turn_diff_tracker::TurnDiffTracker;
 use codex_guardian_context::RenderedVerifiedAnswers;
 use codex_protocol::ThreadId;
+#[cfg(feature = "brr-runtime")]
+use codex_protocol::items::TurnItem;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
@@ -160,7 +162,7 @@ async fn request_user_input_sets_non_blocking_outside_plan_mode(
         panic!("expected request_user_input event");
     };
     assert_eq!(request_event.call_id, "call-1");
-    assert!(!request_event.is_blocking);
+    assert_eq!(request_event.is_blocking, cfg!(feature = "brr-runtime"));
 
     session
         .notify_user_input_response(
@@ -186,6 +188,51 @@ async fn request_user_input_sets_non_blocking_outside_plan_mode(
         .expect("request_user_input handler task should finish")
         .expect("request_user_input handler should succeed");
     assert!(output.success_for_logging());
+    #[cfg(feature = "brr-runtime")]
+    {
+        let started = events.recv().await.expect("accepted answer item started");
+        let EventMsg::ItemStarted(started) = started.msg else {
+            panic!("expected accepted answer item start");
+        };
+        let TurnItem::FunctionCallOutput(started_output) = started.item else {
+            panic!("expected request_user_input function output start");
+        };
+        assert_eq!(started_output.id, "call-1");
+        assert_eq!(started_output.name, REQUEST_USER_INPUT_TOOL_NAME);
+
+        let completed = events.recv().await.expect("accepted answer item completed");
+        let EventMsg::ItemCompleted(completed) = completed.msg else {
+            panic!("expected accepted answer item completion");
+        };
+        let TurnItem::FunctionCallOutput(completed_output) = completed.item else {
+            panic!("expected request_user_input function output completion");
+        };
+        assert_eq!(completed_output.id, "call-1");
+        assert_eq!(completed_output.name, REQUEST_USER_INPUT_TOOL_NAME);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(
+                &completed_output
+                    .output
+                    .to_text()
+                    .expect("text answer output"),
+            )
+            .expect("answer output should be JSON"),
+            serde_json::to_value(RequestUserInputResponse {
+                answers: answer
+                    .iter()
+                    .map(|(question_id, answer)| {
+                        (
+                            (*question_id).to_owned(),
+                            RequestUserInputAnswer {
+                                answers: vec![answer.clone()],
+                            },
+                        )
+                    })
+                    .collect(),
+            })
+            .expect("response should serialize"),
+        );
+    }
     let history = session.conversation_history_snapshot().await;
     let RenderedVerifiedAnswers {
         fragments,

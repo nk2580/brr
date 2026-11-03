@@ -495,6 +495,7 @@ web_search = true
             web_search: None,
             experimental_request_user_input: None,
             update_plan: None,
+            brr_ui: None,
         })
     );
 }
@@ -515,6 +516,7 @@ web_search = false
             web_search: None,
             experimental_request_user_input: None,
             update_plan: None,
+            brr_ui: None,
         })
     );
 }
@@ -534,6 +536,7 @@ fn tools_experimental_request_user_input_defaults_to_enabled() {
             web_search: None,
             experimental_request_user_input: Some(ExperimentalRequestUserInput { enabled: true }),
             update_plan: None,
+            brr_ui: None,
         })
     );
 }
@@ -554,6 +557,7 @@ enabled = false
             web_search: None,
             experimental_request_user_input: Some(ExperimentalRequestUserInput { enabled: false }),
             update_plan: None,
+            brr_ui: None,
         })
     );
 }
@@ -569,6 +573,7 @@ async fn load_config_resolves_experimental_request_user_input_enabled() -> std::
                     enabled: false,
                 }),
                 update_plan: None,
+                brr_ui: None,
             }),
             ..ConfigToml::default()
         },
@@ -661,6 +666,27 @@ async fn load_config_resolves_update_plan_enabled() -> std::io::Result<()> {
             config.update_plan_enabled, expected_enabled,
             "{config_toml}"
         );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn load_config_resolves_brr_ui_enabled() -> std::io::Result<()> {
+    let codex_home = tempdir()?;
+    for (config_toml, expected_enabled) in [
+        ("", false),
+        ("[tools.brr_ui]", false),
+        ("[tools.brr_ui]\nenabled = false", false),
+        ("[tools.brr_ui]\nenabled = true", true),
+    ] {
+        let config = Config::load_from_base_config_with_overrides(
+            toml::from_str(config_toml).expect("TOML deserialization should succeed"),
+            ConfigOverrides::default(),
+            codex_home.abs(),
+        )
+        .await?;
+
+        assert_eq!(config.brr_ui_enabled, expected_enabled, "{config_toml}");
     }
     Ok(())
 }

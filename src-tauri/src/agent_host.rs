@@ -7,7 +7,7 @@ use crate::{
 };
 use brr_agent_core::{
     AgentStore, DelegationNode, MemoryAccess, ProfileCandidate, SessionBinding, TaskAction,
-    TaskInput, TaskSettings, WorkflowInput,
+    TaskInput, TaskSettings, WorkflowInput, WorkspacePermission,
 };
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
@@ -18,11 +18,16 @@ use std::{
 
 pub(crate) struct AgentHost {
     pub(crate) store: AgentStore,
+    pub(crate) chat: crate::chat_state::ChatStore,
+    pub(crate) foreground: crate::chat_service::ForegroundState,
+    pub(crate) projects: crate::projects::ProjectStore,
     pub(crate) rpc: RuntimeRpc,
     pub(crate) worktrees: WorktreeManager,
     pub(crate) root: PathBuf,
     pub(crate) events: EventSink,
     pub(crate) workers: WorkerState,
+    pub(crate) questions: crate::questions::QuestionState,
+    browser_handler: std::sync::RwLock<Option<crate::workspace_bridge::BrowserToolHandler>>,
 }
 
 impl AgentHost {
@@ -31,15 +36,22 @@ impl AgentHost {
         rpc: RuntimeRpc,
         worktrees: WorktreeManager,
         events: EventSink,
+        store: AgentStore,
+        projects: crate::projects::ProjectStore,
     ) -> Result<Arc<Self>, String> {
-        let store = AgentStore::open(root.clone()).await?;
+        let chat = crate::chat_state::ChatStore::open(root.join("chat")).await?;
         let host = Arc::new(Self {
+            chat,
+            foreground: Default::default(),
             store,
+            projects,
             rpc,
             worktrees,
             root,
             events,
             workers: WorkerState::new(),
+            questions: crate::questions::QuestionState::new(),
+            browser_handler: std::sync::RwLock::new(None),
         });
         sqlx::query("CREATE TABLE IF NOT EXISTS host_learning_evidence(source_id TEXT PRIMARY KEY,thread_id TEXT NOT NULL,processed INTEGER NOT NULL DEFAULT 0,source_role TEXT NOT NULL DEFAULT 'user')").execute(host.store.pool()).await.map_err(|e|e.to_string())?;
         let columns: Vec<String> =
@@ -50,13 +62,18 @@ impl AgentHost {
         if !columns.iter().any(|c| c == "source_role") {
             sqlx::query("ALTER TABLE host_learning_evidence ADD COLUMN source_role TEXT NOT NULL DEFAULT 'user'").execute(host.store.pool()).await.map_err(|e|e.to_string())?;
         }
+        sqlx::query("CREATE TABLE IF NOT EXISTS host_task_source_workspaces(operation_id TEXT PRIMARY KEY,source_thread_id TEXT NOT NULL,workspace_project TEXT NOT NULL)").execute(host.store.pool()).await.map_err(|e| e.to_string())?;
         host.init_workers().await?;
+        sqlx::query("CREATE TABLE IF NOT EXISTS question_observed_turns(thread_id TEXT NOT NULL,turn_id TEXT NOT NULL,reconciled INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(thread_id,turn_id))")
+            .execute(host.store.pool()).await.map_err(|e|e.to_string())?;
+        crate::intelligent_ui::init(&host).await?;
         Ok(host)
     }
 
     pub(crate) fn changed(&self) {
         (self.events)(json!({"method":"brr/agents/changed","params":{}}));
         (self.events)(json!({"method":"brr/tasks/changed","params":{}}));
+        (self.events)(json!({"method":"brr/tickets/changed","params":{}}));
     }
 
     pub(crate) async fn require_account(&self) -> Result<(), String> {
@@ -69,6 +86,58 @@ impl AgentHost {
         } else {
             Err("Sign in with ChatGPT to use an agent.".into())
         }
+    }
+
+    pub(crate) async fn control_task_with_run(
+        &self,
+        task_id: &str,
+        action: TaskAction,
+        expected_run_id: Option<&str>,
+    ) -> Result<brr_agent_core::Task, String> {
+        let _control = self.workers.task_control_guard(task_id).await;
+        let old = self.store.get_task(task_id).await?;
+        if expected_run_id.is_some_and(|expected| {
+            old.run_id.as_deref() != Some(expected)
+                || matches!(old.status.as_str(), "succeeded" | "failed" | "cancelled")
+        }) {
+            return Ok(old);
+        }
+        if matches!(action, TaskAction::Pause | TaskAction::Cancel) {
+            if let Some(run_id) = old.run_id.as_ref() {
+                let run = self.store.get_run(run_id).await?;
+                if let (Some(thread), Some(turn)) = (run.thread_id, run.turn_id) {
+                    let turns = crate::agent_workers::thread_turns(self, &thread)
+                        .await
+                        .map_err(|error| format!("Could not verify whether the task turn is active. The runtime did not confirm interruption; the task remains active: {error}"))?;
+                    let turn_status = turns
+                        .iter()
+                        .find(|candidate| candidate["id"].as_str() == Some(turn.as_str()))
+                        .and_then(|candidate| candidate["status"].as_str())
+                        .ok_or("Could not verify whether the task turn is active. The runtime did not confirm interruption; the task remains active")?;
+                    if matches!(turn_status, "inProgress" | "in_progress") {
+                        self.rpc
+                            .call("turn/interrupt", json!({"threadId":thread,"turnId":turn}))
+                            .await
+                            .map_err(|error| format!("The runtime did not confirm interruption; the task remains active: {error}"))?;
+                    } else if !matches!(turn_status, "completed" | "interrupted" | "failed") {
+                        return Err("Could not verify whether the task turn is active. The runtime did not confirm interruption; the task remains active".into());
+                    }
+                }
+            }
+        }
+        let updated = self.store.control_task(task_id, action.clone()).await?;
+        if action == TaskAction::Cancel {
+            if let Some(thread_id) = old.thread_id.as_deref() {
+                self.store
+                    .close_questions(thread_id, None, "task cancelled by user")
+                    .await?;
+                self.questions_changed(Some(thread_id));
+            }
+            if let Some(run_id) = old.run_id.as_deref() {
+                self.workers.forget_run(run_id);
+            }
+        }
+        Ok(updated)
     }
 
     pub async fn request(&self, method: &str, params: Value) -> Result<Value, String> {
@@ -104,7 +173,9 @@ impl AgentHost {
                     "interview",
                     required(&params, "model")?,
                     None,
+                    None,
                     true,
+                    None,
                     None,
                 )
                 .await?
@@ -121,7 +192,9 @@ impl AgentHost {
                     "profile",
                     &profile.model,
                     None,
+                    None,
                     true,
+                    None,
                     None,
                 )
                 .await?
@@ -149,7 +222,10 @@ impl AgentHost {
                 json!({})
             }
             "agents.open" => {
-                check_fields(&params, &["agentId", "model", "effort", "cwd", "readOnly"])?;
+                check_fields(
+                    &params,
+                    &["agentId", "model", "effort", "cwd", "projectId", "readOnly"],
+                )?;
                 self.require_account().await?;
                 let profile = self
                     .store
@@ -160,7 +236,9 @@ impl AgentHost {
                     "agent",
                     optional(&params, "model").unwrap_or(&profile.model),
                     optional(&params, "cwd"),
+                    optional(&params, "projectId"),
                     params["readOnly"].as_bool().unwrap_or(false),
+                    None,
                     None,
                 )
                 .await?
@@ -185,8 +263,7 @@ impl AgentHost {
             }
             "memory.projects" => {
                 check_fields(&params, &[])?;
-                let projects:Vec<String>=sqlx::query_scalar("SELECT DISTINCT project_id FROM session_bindings WHERE project_id IS NOT NULL AND kind!='user' ORDER BY project_id").fetch_all(self.store.pool()).await.map_err(|e|e.to_string())?;
-                json!({"data":projects})
+                json!({"data":self.projects.list().await?})
             }
             "memory.list" | "memory.search" => {
                 check_fields(&params, &["agentId", "projectId", "query"])?;
@@ -272,32 +349,29 @@ impl AgentHost {
                         "operationId",
                     ],
                 )?;
-                let mut input: TaskInput = parse(params.clone())?;
-                self.validate_task(&mut input).await?;
-                if let Some(id) = optional(&params, "operationId") {
-                    json!(self.store.create_task_once(input, id).await?)
-                } else {
-                    json!(self.store.create_task(input).await?)
+                let _creation = self.foreground.task_creation.lock().await;
+                if let Some(operation_id) = optional(&params, "operationId") {
+                    let reserved: Option<String> = sqlx::query_scalar(
+                        "SELECT operation_id FROM chat_assignment_context WHERE operation_id=?",
+                    )
+                    .bind(operation_id)
+                    .fetch_optional(&self.chat.pool)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                    if reserved.is_some() {
+                        return Err(
+                            "operationId is reserved by a chat task assignment; retry that assignment or use a new operation ID".into(),
+                        );
+                    }
                 }
+                self.create_task_with_workspace(params).await?
             }
             "tasks.control" => {
                 check_fields(&params, &["taskId", "action"])?;
                 let id = required(&params, "taskId")?;
-                let _control = self.workers.task_control_guard(id).await;
-                let old = self.store.get_task(id).await?;
                 let action: TaskAction = parse(params["action"].clone())?;
-                if matches!(action, TaskAction::Pause | TaskAction::Cancel) {
-                    if let Some(run) = old.run_id.as_ref() {
-                        let run = self.store.get_run(run).await?;
-                        if let (Some(thread), Some(turn)) = (run.thread_id, run.turn_id) {
-                            self
-                                .rpc
-                                .call("turn/interrupt", json!({"threadId":thread,"turnId":turn}))
-                                .await.map_err(|e|format!("The runtime did not confirm interruption; the task remains active: {e}"))?;
-                        }
-                    }
-                }
-                json!(self.store.control_task(id, action).await?)
+                let updated = self.control_task_with_run(id, action, None).await?;
+                json!(updated)
             }
             "tasks.proposals" => {
                 check_fields(&params, &["agentId"])?;
@@ -429,10 +503,22 @@ impl AgentHost {
         if input.effort.is_none() {
             input.effort = Some(profile.effort);
         }
-        if let Some(cwd) = input.cwd.as_ref() {
-            let folder = canonical_folder(cwd)?;
-            input.project_id = Some(folder.clone());
-            input.cwd = Some(folder);
+        if let Some(project_id) = input.project_id.as_deref() {
+            let project = self
+                .project_for_start(Some(project_id), None)
+                .await?
+                .ok_or("Project not found")?;
+            if let Some(cwd) = input.cwd.as_deref() {
+                let selected = canonical_folder(cwd)?;
+                if !project.folders.contains(&selected) {
+                    return Err("The selected task folder is not registered to its project".into());
+                }
+                input.cwd = Some(selected);
+            } else {
+                input.cwd = project.primary_folder;
+            }
+        } else if let Some(cwd) = input.cwd.as_ref() {
+            input.cwd = Some(canonical_folder(cwd)?);
         }
         if input.title.trim().is_empty()
             || input.instructions.trim().is_empty()
@@ -443,69 +529,186 @@ impl AgentHost {
         Ok(())
     }
 
+    /// Resolve scope separately from execution paths. Ad-hoc folders never imply a project.
+    pub(crate) async fn project_for_start(
+        &self,
+        project_id: Option<&str>,
+        cwd: Option<&str>,
+    ) -> Result<Option<crate::projects::ProjectRecord>, String> {
+        if let Some(id) = project_id {
+            let project = self
+                .projects
+                .read(id)
+                .await?
+                .filter(|p| !p.hidden)
+                .ok_or("Project does not exist")?;
+            return Ok(Some(project));
+        }
+        cwd.map(|folder| {
+            let folder = canonical_folder(folder)?;
+            Ok(crate::projects::ProjectRecord {
+                id: String::new(),
+                name: "Workspace".into(),
+                folders: vec![folder.clone()],
+                primary_folder: Some(folder),
+                revision: 0,
+                model: None,
+                effort: None,
+                permission: None,
+                hidden: false,
+            })
+        })
+        .transpose()
+    }
+
+    pub(crate) async fn prepare_workspace(
+        &self,
+        project_id: Option<&str>,
+        cwd: Option<&str>,
+    ) -> Result<crate::worktrees::SessionWorkspace, String> {
+        let project = self.project_for_start(project_id, cwd).await?;
+        let mut workspace = self.worktrees.prepare_session(project.as_ref()).await?;
+        if project_id.is_none() {
+            workspace.scope_project_id = None;
+            workspace.project_revision = None;
+        }
+        Ok(workspace)
+    }
+
     pub(crate) async fn open_session(
         &self,
         agent_id: Option<String>,
         kind: &str,
         model: &str,
         cwd: Option<&str>,
+        project_id: Option<&str>,
         read_only: bool,
         task_run_id: Option<String>,
+        workspace_permission: Option<WorkspacePermission>,
     ) -> Result<Value, String> {
-        let scratch = self
-            .root
-            .join("sessions")
-            .join(uuid::Uuid::new_v4().to_string());
-        std::fs::create_dir_all(&scratch).map_err(|e| e.to_string())?;
-        let mut workspace = None;
-        let mut project_id = None;
-        let folder = if let Some(cwd) = cwd {
-            let selected = canonical_folder(cwd)?;
-            project_id = Some(selected.clone());
-            if git_folder(&selected).await? {
-                let prepared = self.worktrees.prepare(&selected).await?;
-                let folder = prepared.cwd.clone();
-                workspace = Some(prepared);
-                folder
+        let workspace = if kind == "task" {
+            if let (Some(project_id), Some(cwd)) = (project_id, cwd) {
+                let mut project = self
+                    .project_for_start(Some(project_id), None)
+                    .await?
+                    .ok_or("Task project no longer exists")?;
+                let selected = canonical_folder(cwd)?;
+                if !project.folders.contains(&selected) {
+                    return Err(
+                        "The selected task folder is no longer registered to its project".into(),
+                    );
+                }
+                project.primary_folder = Some(selected);
+                self.worktrees.prepare_session(Some(&project)).await?
             } else {
-                selected
+                self.prepare_workspace(project_id, cwd).await?
             }
         } else {
-            scratch.to_string_lossy().into_owned()
+            self.prepare_workspace(project_id, cwd).await?
         };
+        self.open_session_with_workspace(
+            agent_id,
+            kind,
+            model,
+            workspace,
+            read_only,
+            task_run_id,
+            workspace_permission,
+            project_id,
+        )
+        .await
+    }
+
+    pub(crate) async fn open_task_session_with_project_snapshot(
+        &self,
+        agent_id: Option<String>,
+        model: &str,
+        task_run_id: &str,
+        workspace_permission: Option<WorkspacePermission>,
+        project: &crate::projects::ProjectRecord,
+    ) -> Result<Value, String> {
+        let mut workspace = self.worktrees.prepare_session(Some(project)).await?;
+        if project.id.is_empty() {
+            workspace.scope_project_id = None;
+            workspace.project_revision = None;
+        }
+        self.open_session_with_workspace(
+            agent_id,
+            "task",
+            model,
+            workspace,
+            false,
+            Some(task_run_id.to_owned()),
+            workspace_permission,
+            Some(&project.id),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn open_session_with_workspace(
+        &self,
+        agent_id: Option<String>,
+        kind: &str,
+        model: &str,
+        workspace: crate::worktrees::SessionWorkspace,
+        read_only: bool,
+        task_run_id: Option<String>,
+        workspace_permission: Option<WorkspacePermission>,
+        project_id: Option<&str>,
+    ) -> Result<Value, String> {
         let mut response = self.rpc.call("thread/start", json!({
-            "cwd":folder,"model":model,"modelProvider":"openai","approvalPolicy":"on-request",
-            "sandbox":if read_only {"read-only"} else {"workspace-write"},
+            "cwd":workspace.cwd,"runtimeWorkspaceRoots":workspace.roots,"model":model,"modelProvider":"openai","approvalPolicy":"on-request",
+            "sandbox":match workspace_permission.as_ref() { Some(WorkspacePermission::ReadOnly) => "read-only", Some(WorkspacePermission::WorkspaceWrite) => "workspace-write", None if read_only => "read-only", None => "workspace-write" },
             "developerInstructions":agent_protocol::instructions(kind),
-            "dynamicTools":agent_protocol::tools(kind),"config":agent_protocol::thread_config(kind),
+            "dynamicTools":agent_protocol::tools(kind),"config":workspace_config(kind, &workspace),
             "ephemeral":kind=="learning"
-        })).await?;
+        })).await.map_err(|e| format!("{e}. Prepared workspace retained at {}", workspace.cwd))?;
         let thread_id = response["thread"]["id"]
             .as_str()
             .ok_or("Runtime did not return a thread ID")?
             .to_owned();
-        if let Some(workspace) = workspace {
-            self.worktrees.save(&thread_id, &workspace)?;
-            response["thread"]["worktree"] = json!(workspace);
-        }
+        self.worktrees
+            .save_session(&thread_id, &workspace)
+            .map_err(|e| {
+                format!(
+                    "{e}. Thread {thread_id} and workspace {} were retained.",
+                    workspace.cwd
+                )
+            })?;
         let binding = SessionBinding {
-            thread_id,
+            thread_id: thread_id.clone(),
             agent_id,
             kind: kind.into(),
-            project_id,
-            cwd: Some(folder),
+            project_id: workspace.scope_project_id.clone(),
+            cwd: Some(workspace.cwd.clone()),
             task_run_id,
             learning_eligible: matches!(kind, "agent" | "baseline" | "task"),
         };
         self.store.bind_session(binding.clone()).await?;
+        if matches!(kind, "agent" | "baseline") {
+            self.register_fresh_chat(&thread_id);
+        }
+        if matches!(kind, "agent" | "baseline") {
+            self.projects.set_membership(&thread_id, project_id).await?;
+        }
         response["thread"]["brr"] = json!(binding);
+        response["thread"]["projectId"] = json!(self.projects.membership(&thread_id).await?);
+        response["thread"]["workspace"] = json!(workspace);
+        if let Some(worktree) = workspace.worktrees.first() {
+            response["thread"]["worktree"] = json!(worktree);
+        }
         self.changed();
         Ok(response)
     }
 
     pub(crate) async fn annotate(&self, thread: &mut Value) {
-        if let Some(id) = thread["id"].as_str() {
-            if let Ok(binding) = self.store.session_binding(id).await {
+        if let Some(id) = thread["id"].as_str().map(str::to_owned) {
+            thread["projectId"] = json!(self.projects.membership(&id).await.unwrap_or(None));
+            if let Ok(Some(workspace)) = self.worktrees.get_session(&id) {
+                thread["workspace"] = json!(workspace);
+            }
+            if let Ok(binding) = self.store.session_binding(&id).await {
                 thread["brr"] = json!(binding);
             }
         }
@@ -536,6 +739,9 @@ impl AgentHost {
         thread_id: &str,
         mut params: Value,
     ) -> Result<Value, String> {
+        if let Some(workspace) = self.worktrees.get_session(thread_id)? {
+            self.worktrees.validate_session(&workspace).await?;
+        }
         let Ok(binding) = self.store.session_binding(thread_id).await else {
             return Ok(params);
         };
@@ -554,7 +760,7 @@ impl AgentHost {
                     .join("\n")
             })
             .unwrap_or_default();
-        if binding.learning_eligible {
+        if binding.learning_eligible && params["clientUserMessageId"].is_null() {
             // Small independent evidence units allow forgetting a fact without erasing a whole conversation.
             for chunk in query
                 .split('\n')
@@ -616,6 +822,8 @@ impl AgentHost {
             context["brr_source_index"] = json!({"kind":"untrusted","name":"brr_source_index","value":serde_json::to_string(&sources).map_err(|e|e.to_string())?});
         }
         params["additionalContext"] = context;
+        self.prepare_assigned_chat_context(thread_id, &mut params)
+            .await?;
         Ok(params)
     }
 
@@ -639,7 +847,15 @@ impl AgentHost {
         Ok(())
     }
 
+    pub(crate) fn set_browser_handler(&self, handler: crate::workspace_bridge::BrowserToolHandler) {
+        *self.browser_handler.write().unwrap() = Some(handler);
+    }
+
     pub async fn handle_tool(&self, params: Value) -> Result<Value, String> {
+        // Dedicated rendering path; UI output does not acquire memory authority.
+        if required(&params, "tool")? == "brr_ui_render" {
+            return crate::intelligent_ui::render(self, params).await;
+        }
         let thread = required(&params, "threadId")?;
         let binding = self.store.session_binding(thread).await?;
         let _control = if binding.kind == "task" {
@@ -673,6 +889,15 @@ impl AgentHost {
         let args = &params["arguments"];
         if !args.is_object() {
             return Err("Tool arguments must be an object".into());
+        }
+        if tool == "brr_browser" {
+            let handler = self
+                .browser_handler
+                .read()
+                .unwrap()
+                .clone()
+                .ok_or("The inline browser is unavailable in this host")?;
+            return handler(thread.to_owned(), args.clone()).await;
         }
         let result = match tool {
             "brr_agent_propose" => {
@@ -803,6 +1028,7 @@ impl AgentHost {
                             project_id: binding.project_id,
                             model: None,
                             effort: None,
+                            workspace_permission: None,
                             dependencies: vec![],
                         })
                         .await?
@@ -812,6 +1038,15 @@ impl AgentHost {
             }
             "brr_task_complete" | "brr_task_block" | "brr_learning_done" => {
                 self.tool_task(&binding, &params, args).await?
+            }
+            "brr_project_list"
+            | "brr_ticket_list"
+            | "brr_ticket_read"
+            | "brr_ticket_create"
+            | "brr_ticket_update"
+            | "brr_ticket_comment"
+            | "brr_ticket_run_propose" => {
+                crate::tickets::runtime_tool(self, &binding, &params, args).await?
             }
             _ => return Err("Unsupported agent harness tool".into()),
         };
@@ -930,7 +1165,7 @@ fn evidence_refs(args: &Value) -> Result<Vec<String>, String> {
     Ok(refs)
 }
 
-fn redact_evidence(text: &str) -> String {
+pub(crate) fn redact_evidence(text: &str) -> String {
     let mut content: String = text
         .lines()
         .map(|line| {
@@ -987,4 +1222,14 @@ mod evidence_tests {
         assert!(!redact_evidence("api_key=synthetic-test-credential")
             .contains("synthetic-test-credential"));
     }
+}
+
+/// Runtime roots are supplied only by the native host, never by UI configuration.
+pub(crate) fn workspace_config(
+    kind: &str,
+    workspace: &crate::worktrees::SessionWorkspace,
+) -> Value {
+    let mut config = agent_protocol::thread_config(kind);
+    config["sandbox_workspace_write.writable_roots"] = json!(workspace.roots);
+    config
 }

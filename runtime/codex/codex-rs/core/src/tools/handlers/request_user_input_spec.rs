@@ -5,6 +5,7 @@ use codex_tools::ResponsesApiTool;
 use codex_tools::ToolSpec;
 use serde::Deserialize;
 use std::collections::BTreeMap;
+use std::collections::HashSet;
 
 pub const REQUEST_USER_INPUT_TOOL_NAME: &str = "request_user_input";
 
@@ -27,7 +28,7 @@ pub fn create_request_user_input_tool(description: String) -> ToolSpec {
         ),
     ]);
 
-    let options_schema = JsonSchema::array(JsonSchema::object(
+    let mut options_schema = JsonSchema::array(JsonSchema::object(
             option_props,
             Some(vec!["label".to_string(), "description".to_string()]),
             Some(false.into()),
@@ -35,6 +36,9 @@ pub fn create_request_user_input_tool(description: String) -> ToolSpec {
             "Provide 2-3 mutually exclusive choices. Put the recommended option first and suffix its label with \"(Recommended)\". Do not include an \"Other\" option in this list; the client will add a free-form \"Other\" option automatically."
                 .to_string(),
         ));
+    if cfg!(feature = "brr-runtime") {
+        options_schema.min_items = Some(1);
+    }
 
     let question_props = BTreeMap::from([
         (
@@ -61,12 +65,20 @@ pub fn create_request_user_input_tool(description: String) -> ToolSpec {
     let questions_schema = JsonSchema::array(
         JsonSchema::object(
             question_props,
-            Some(vec![
-                "id".to_string(),
-                "header".to_string(),
-                "question".to_string(),
-                "options".to_string(),
-            ]),
+            Some(if cfg!(feature = "brr-runtime") {
+                vec![
+                    "id".to_string(),
+                    "header".to_string(),
+                    "question".to_string(),
+                ]
+            } else {
+                vec![
+                    "id".to_string(),
+                    "header".to_string(),
+                    "question".to_string(),
+                    "options".to_string(),
+                ]
+            }),
             Some(false.into()),
         ),
         Some("Questions to show the user. Prefer 1 and do not exceed 3".to_string()),
@@ -105,6 +117,33 @@ pub fn request_user_input_unavailable_message(
 pub(crate) fn normalize_request_user_input_tool_args(
     mut args: RequestUserInputToolArgs,
 ) -> Result<RequestUserInputToolArgs, String> {
+    if cfg!(feature = "brr-runtime") {
+        if !(1..=3).contains(&args.questions.len()) {
+            return Err("questions must contain between one and three items".to_string());
+        }
+        let mut ids = HashSet::with_capacity(args.questions.len());
+        for question in &args.questions {
+            if question.id.trim().is_empty() || !ids.insert(question.id.as_str()) {
+                return Err("question ids must be unique and non-empty".to_string());
+            }
+            if question.header.trim().is_empty() || question.question.trim().is_empty() {
+                return Err("question headers and text must not be empty".to_string());
+            }
+            if question.options.as_ref().is_some_and(|options| {
+                options.is_empty()
+                    || options.iter().any(|option| {
+                        option.label.trim().is_empty() || option.description.trim().is_empty()
+                    })
+            }) {
+                return Err("options must contain non-empty labels and descriptions".to_string());
+            }
+        }
+        for question in &mut args.questions {
+            question.is_other = true;
+        }
+        return Ok(args);
+    }
+
     let missing_options = args
         .questions
         .iter()

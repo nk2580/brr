@@ -171,6 +171,7 @@ fn persisted_event_msg(
         | EventMsg::CollabResumeEnd(_)
         | EventMsg::DynamicToolCallRequest(_)
         | EventMsg::DynamicToolCallResponse(_)
+        | EventMsg::BrrUiArgumentsDelta(_)
         | EventMsg::Warning(_)
         | EventMsg::AuthRecoveryStarted(_)
         | EventMsg::AuthRecoveryCompleted(_)

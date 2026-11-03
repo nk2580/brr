@@ -23,7 +23,16 @@ pub struct TaskInput {
     #[serde(default)]
     pub effort: Option<String>,
     #[serde(default)]
+    pub workspace_permission: Option<WorkspacePermission>,
+    #[serde(default)]
     pub dependencies: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum WorkspacePermission {
+    ReadOnly,
+    WorkspaceWrite,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -39,6 +48,8 @@ pub struct Task {
     pub project_id: Option<String>,
     pub model: Option<String>,
     pub effort: Option<String>,
+    #[serde(default)]
+    pub workspace_permission: Option<WorkspacePermission>,
     pub dependencies: Vec<String>,
     pub status: String,
     pub reason: Option<String>,
@@ -110,12 +121,43 @@ pub(crate) async fn init(pool: &SqlitePool) -> Result<(), String> {
             dependencies TEXT NOT NULL, status TEXT NOT NULL, reason TEXT,
             run_id TEXT, thread_id TEXT, result TEXT, evidence TEXT,
             parent_task_id TEXT, delegation_id TEXT, delegation_index INTEGER, workflow_id TEXT, occurrence_id TEXT,
-            created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+            created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+            workspace_permission TEXT, ticket_id TEXT, ticket_status_revision INTEGER,
+            ticket_status_started INTEGER NOT NULL DEFAULT 0
         )",
     )
     .execute(pool)
     .await
     .map_err(err)?;
+    for (column, migration) in [
+        (
+            "workspace_permission",
+            "ALTER TABLE tasks ADD COLUMN workspace_permission TEXT",
+        ),
+        ("ticket_id", "ALTER TABLE tasks ADD COLUMN ticket_id TEXT"),
+        (
+            "ticket_status_revision",
+            "ALTER TABLE tasks ADD COLUMN ticket_status_revision INTEGER",
+        ),
+        (
+            "ticket_status_started",
+            "ALTER TABLE tasks ADD COLUMN ticket_status_started INTEGER NOT NULL DEFAULT 0",
+        ),
+    ] {
+        let exists: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name=?")
+                .bind(column)
+                .fetch_one(pool)
+                .await
+                .map_err(err)?;
+        if exists == 0 {
+            sqlx::query(migration).execute(pool).await.map_err(err)?;
+        }
+    }
+    sqlx::query("CREATE UNIQUE INDEX IF NOT EXISTS one_unfinished_task_per_ticket ON tasks(ticket_id) WHERE ticket_id IS NOT NULL AND status NOT IN ('succeeded','failed','cancelled')")
+        .execute(pool).await.map_err(err)?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS tasks_ticket_history ON tasks(ticket_id)")
+        .execute(pool).await.map_err(err)?;
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS task_runs (
             id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id),
@@ -361,7 +403,7 @@ impl AgentStore {
         let stamp = now();
         let run = if let Some(existing_id) = task.run_id.as_deref() {
             let token = id();
-            let changed = sqlx::query("UPDATE task_runs SET worker_id=?,lease_token=?,state='running',settled_at=NULL,turn_id=NULL,proposed_result=NULL,proposed_evidence=NULL WHERE id=? AND task_id=? AND state IN ('delegated','paused')")
+            let changed = sqlx::query("UPDATE task_runs SET worker_id=?,lease_token=?,state='running',settled_at=NULL,turn_id=NULL,proposed_result=NULL,proposed_evidence=NULL WHERE id=? AND task_id=? AND state IN ('delegated','paused','waiting_input')")
                 .bind(worker_id).bind(&token).bind(existing_id).bind(&task.id).execute(&mut *tx).await.map_err(err)?;
             if changed.rows_affected() != 1 {
                 tx.rollback().await.map_err(err)?;
@@ -435,6 +477,13 @@ impl AgentStore {
             .map_err(err)?;
         let run = get_run(&mut tx, run_id).await?;
         event(&mut tx, "task.run_attached", task_id, &run).await?;
+        crate::tickets::auto_lifecycle_status(
+            &mut tx,
+            task_id,
+            crate::TicketStatus::InProgress,
+            stamp,
+        )
+        .await?;
         tx.commit().await.map_err(err)?;
         Ok(run)
     }
@@ -500,6 +549,13 @@ impl AgentStore {
         if changed.rows_affected() != 1 {
             return Err("task run cannot accept this continuation binding".into());
         }
+        crate::tickets::auto_lifecycle_status(
+            &mut tx,
+            task_id,
+            crate::TicketStatus::InProgress,
+            now(),
+        )
+        .await?;
         sqlx::query("UPDATE tasks SET thread_id=?,updated_at=? WHERE id=? AND run_id=?")
             .bind(thread_id)
             .bind(now())
@@ -510,6 +566,55 @@ impl AgentStore {
             .map_err(err)?;
         let run = get_run(&mut tx, run_id).await?;
         event(&mut tx, "task.continuation_attached", task_id, &run).await?;
+        tx.commit().await.map_err(err)?;
+        Ok(run)
+    }
+
+    /// Clears the completed/interrupted question source turn before its answer follow-up starts.
+    /// The host must verify the source outcome before calling this fenced transition.
+    pub async fn prepare_question_continuation(
+        &self,
+        task_id: &str,
+        run_id: &str,
+        source_turn_id: &str,
+        lease_token: &str,
+    ) -> Result<TaskRun, String> {
+        if source_turn_id.trim().is_empty() {
+            return Err("question source turn id is required".into());
+        }
+        let mut tx = self.pool.begin().await.map_err(err)?;
+        let run_row = sqlx::query(
+            "SELECT turn_id FROM task_runs WHERE id=? AND task_id=? AND state='running' AND lease_token=?",
+        )
+        .bind(run_id)
+        .bind(task_id)
+        .bind(lease_token)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(err)?
+        .ok_or_else(|| "question continuation requires the active task run lease".to_string())?;
+        let current_turn: Option<String> = run_row.try_get("turn_id").map_err(err)?;
+        if current_turn
+            .as_deref()
+            .is_some_and(|turn_id| turn_id != source_turn_id)
+        {
+            return Err("question source turn does not match the active task run".into());
+        }
+        sqlx::query("UPDATE task_runs SET turn_id=NULL,proposed_result=NULL,proposed_evidence=NULL WHERE id=? AND task_id=? AND state='running' AND lease_token=?")
+            .bind(run_id)
+            .bind(task_id)
+            .bind(lease_token)
+            .execute(&mut *tx)
+            .await
+            .map_err(err)?;
+        let run = get_run(&mut tx, run_id).await?;
+        event(
+            &mut tx,
+            "task.question_continuation_prepared",
+            task_id,
+            &json!({"sourceTurnId":source_turn_id,"run":run}),
+        )
+        .await?;
         tx.commit().await.map_err(err)?;
         Ok(run)
     }
@@ -579,6 +684,24 @@ impl AgentStore {
         .await
     }
 
+    /// Yields a worker slot while the host waits for an answer to a durable question request.
+    /// The runtime thread and workspace remain bound to this run for host-owned continuation.
+    pub async fn wait_for_input(
+        &self,
+        task_id: &str,
+        run_id: &str,
+        lease_token: &str,
+    ) -> Result<Task, String> {
+        self.set_run_pause_state(
+            task_id,
+            run_id,
+            lease_token,
+            "waiting_input",
+            "waiting for user input",
+        )
+        .await
+    }
+
     /// Blocks uncertain or unsupported runtime outcomes without replaying the turn.
     pub async fn block_run(
         &self,
@@ -605,10 +728,10 @@ impl AgentStore {
         reason: &str,
     ) -> Result<Task, String> {
         let mut tx = self.pool.begin().await.map_err(err)?;
-        let task_status = if state == "waiting_approval" {
-            "waiting_approval"
-        } else {
-            "blocked"
+        let task_status = match state {
+            "waiting_approval" => "waiting_approval",
+            "waiting_input" => "waiting_input",
+            _ => "blocked",
         };
         let stamp = now();
         let changed=sqlx::query("UPDATE task_runs SET state=?,settled_at=NULL WHERE id=? AND task_id=? AND state='running' AND lease_token=?")
@@ -646,7 +769,7 @@ impl AgentStore {
         worker_id: &str,
     ) -> Result<TaskRun, String> {
         let mut tx = self.pool.begin().await.map_err(err)?;
-        let agent_id:String=sqlx::query_scalar("SELECT agent_id FROM task_runs WHERE id=? AND task_id=? AND lease_token=? AND state IN ('waiting_approval','unknown','blocked','paused')")
+        let agent_id:String=sqlx::query_scalar("SELECT agent_id FROM task_runs WHERE id=? AND task_id=? AND lease_token=? AND state IN ('waiting_approval','waiting_input','unknown','blocked','paused')")
             .bind(run_id).bind(task_id).bind(lease_token).fetch_optional(&mut *tx).await.map_err(err)?
             .ok_or_else(||"task run cannot be resumed with this lease".to_string())?;
         let settings =
@@ -672,7 +795,7 @@ impl AgentStore {
         }
         let token = id();
         let stamp = now();
-        let changed=sqlx::query("UPDATE task_runs SET state='running',worker_id=?,lease_token=?,settled_at=NULL WHERE id=? AND task_id=? AND state IN ('waiting_approval','unknown','blocked','paused') AND lease_token=?")
+        let changed=sqlx::query("UPDATE task_runs SET state='running',worker_id=?,lease_token=?,settled_at=NULL WHERE id=? AND task_id=? AND state IN ('waiting_approval','waiting_input','unknown','blocked','paused') AND lease_token=?")
             .bind(worker_id).bind(&token).bind(run_id).bind(task_id).bind(lease_token).execute(&mut *tx).await.map_err(err)?;
         if changed.rows_affected() != 1 {
             return Err("task run cannot be resumed with this lease".into());
@@ -707,6 +830,11 @@ impl AgentStore {
             return Err("completion requires a proposed result and non-empty evidence".into());
         }
         let mut tx = self.pool.begin().await.map_err(err)?;
+        let pending_questions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM question_requests WHERE run_id=? AND (resolution='pending' OR delivery IN ('queued','dispatching','uncertain'))")
+            .bind(run_id).fetch_one(&mut *tx).await.map_err(err)?;
+        if pending_questions > 0 {
+            return Err("task run has unresolved question requests".into());
+        }
         let changed = sqlx::query("UPDATE task_runs SET proposed_result=?,proposed_evidence=? WHERE id=? AND task_id=? AND state='running' AND turn_id IS NOT NULL AND lease_token=?")
             .bind(result).bind(serde_json::to_string(&evidence).map_err(serr)?).bind(run_id).bind(task_id).bind(lease_token)
             .execute(&mut *tx).await.map_err(err)?;
@@ -758,6 +886,13 @@ impl AgentStore {
         if success && (proposed_result.is_none() || proposed_evidence.is_none()) {
             return Err("successful turn requires a proposed result and evidence".into());
         }
+        if success {
+            let pending_questions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM question_requests WHERE run_id=? AND (resolution='pending' OR delivery IN ('queued','dispatching','uncertain'))")
+                .bind(run_id).fetch_one(&mut *tx).await.map_err(err)?;
+            if pending_questions > 0 {
+                return Err("task run has unresolved question requests".into());
+            }
+        }
         let stamp = now();
         let state = if success { "succeeded" } else { "failed" };
         sqlx::query("UPDATE task_runs SET state=?,settled_at=? WHERE id=? AND state='running'")
@@ -773,6 +908,13 @@ impl AgentStore {
         if !success {
             block_failed_dependencies(&mut tx, stamp).await?;
         } else {
+            crate::tickets::auto_lifecycle_status(
+                &mut tx,
+                task_id,
+                crate::TicketStatus::Review,
+                stamp,
+            )
+            .await?;
             unblock_ready_dependents(&mut tx, stamp).await?;
         }
         maybe_resume_parent(&mut tx, task_id, stamp).await?;
@@ -803,24 +945,70 @@ impl AgentStore {
                 task.status = "paused".into();
                 task.reason = Some("paused by user".into());
             }
+            TaskAction::Pause if task.status == "waiting_input" => {
+                sqlx::query("UPDATE task_runs SET state='paused',settled_at=? WHERE id=? AND state='waiting_input'")
+                    .bind(stamp).bind(task.run_id.as_deref().unwrap_or("")).execute(&mut *tx).await.map_err(err)?;
+                task.status = "paused".into();
+                task.reason = Some("paused by user".into());
+            }
             TaskAction::Resume if task.status == "paused" => {
-                task.status = "queued".into();
-                task.reason = None;
+                let pending_question = if let Some(run_id) = task.run_id.as_deref() {
+                    sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM question_requests WHERE run_id=? AND (resolution='pending' OR delivery IN ('queued','dispatching','uncertain')))")
+                        .bind(run_id).fetch_one(&mut *tx).await.map_err(err)?
+                } else {
+                    false
+                };
+                if pending_question {
+                    if let Some(run_id) = task.run_id.as_deref() {
+                        sqlx::query("UPDATE task_runs SET state='waiting_input',settled_at=NULL WHERE id=? AND task_id=? AND state='paused'")
+                            .bind(run_id).bind(task_id).execute(&mut *tx).await.map_err(err)?;
+                    }
+                    task.status = "waiting_input".into();
+                    task.reason = Some("waiting for user input".into());
+                } else {
+                    task.status = "queued".into();
+                    task.reason = None;
+                }
             }
             TaskAction::Cancel
                 if matches!(
                     task.status.as_str(),
-                    "queued" | "paused" | "running" | "blocked" | "waiting_approval"
+                    "queued"
+                        | "paused"
+                        | "running"
+                        | "blocked"
+                        | "waiting_approval"
+                        | "waiting_input"
                 ) =>
             {
-                sqlx::query("UPDATE task_runs SET state='cancelled',settled_at=? WHERE task_id=? AND state IN ('running','waiting_approval','unknown','blocked','delegated','paused')").bind(stamp).bind(task_id).execute(&mut *tx).await.map_err(err)?;
+                sqlx::query("UPDATE task_runs SET state='cancelled',settled_at=? WHERE task_id=? AND state IN ('running','waiting_approval','waiting_input','unknown','blocked','delegated','paused')").bind(stamp).bind(task_id).execute(&mut *tx).await.map_err(err)?;
                 task.status = "cancelled".into();
                 task.reason = Some("cancelled by user".into());
             }
             TaskAction::Retry
                 if matches!(task.status.as_str(), "failed" | "blocked" | "cancelled") =>
             {
-                sqlx::query("UPDATE task_runs SET state='cancelled',settled_at=? WHERE task_id=? AND state IN ('running','waiting_approval','unknown','blocked','delegated','paused')")
+                if let Some(ticket_id) = sqlx::query_scalar::<_, Option<String>>(
+                    "SELECT ticket_id FROM tasks WHERE id=?",
+                )
+                .bind(task_id)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(err)?
+                {
+                    let unfinished: i64 = sqlx::query_scalar(
+                        "SELECT COUNT(*) FROM tasks WHERE ticket_id=? AND id<>? AND status NOT IN ('succeeded','failed','cancelled')",
+                    )
+                    .bind(ticket_id)
+                    .bind(task_id)
+                    .fetch_one(&mut *tx)
+                    .await
+                    .map_err(err)?;
+                    if unfinished > 0 {
+                        return Err("ticket already has an unfinished task".into());
+                    }
+                }
+                sqlx::query("UPDATE task_runs SET state='cancelled',settled_at=? WHERE task_id=? AND state IN ('running','waiting_approval','waiting_input','unknown','blocked','delegated','paused')")
                     .bind(stamp).bind(task_id).execute(&mut *tx).await.map_err(err)?;
                 task.status = "queued".into();
                 task.reason = None;
@@ -828,6 +1016,8 @@ impl AgentStore {
                 task.thread_id = None;
                 task.result = None;
                 task.evidence = None;
+                sqlx::query("UPDATE tasks SET ticket_status_revision=(SELECT status_revision FROM tickets WHERE id=tasks.ticket_id),ticket_status_started=0 WHERE id=? AND ticket_id IS NOT NULL")
+                    .bind(task_id).execute(&mut *tx).await.map_err(err)?;
             }
             _ => return Err(format!("cannot {:?} task in {} state", action, task.status)),
         }
@@ -844,7 +1034,7 @@ impl AgentStore {
 
     pub async fn unresolved_runs(&self) -> Result<Vec<TaskRun>, String> {
         let rows =
-            sqlx::query("SELECT * FROM task_runs WHERE state IN ('running','waiting_approval','unknown','blocked','paused') ORDER BY created_at,id")
+            sqlx::query("SELECT * FROM task_runs WHERE state IN ('running','waiting_approval','waiting_input','unknown','blocked','paused') ORDER BY created_at,id")
             .fetch_all(&self.pool)
                 .await
                 .map_err(err)?;
@@ -854,7 +1044,7 @@ impl AgentStore {
     /// A process restart may continue the same host-owned binding only after it has read runtime state.
     pub async fn recover_run(&self, run_id: &str, lease_token: &str) -> Result<TaskRun, String> {
         let row =
-            sqlx::query("SELECT * FROM task_runs WHERE id=? AND state='running' AND lease_token=?")
+            sqlx::query("SELECT * FROM task_runs WHERE id=? AND state IN ('running','waiting_input') AND lease_token=?")
                 .bind(run_id)
                 .bind(lease_token)
                 .fetch_optional(&self.pool)
@@ -1132,7 +1322,7 @@ fn row_proposal(row: sqlx::sqlite::SqliteRow) -> Result<DelegationProposal, Stri
     })
 }
 
-fn validate_input(input: &TaskInput) -> Result<(), String> {
+pub(crate) fn validate_input(input: &TaskInput) -> Result<(), String> {
     if input.agent_id.trim().is_empty()
         || input.title.trim().is_empty()
         || input.instructions.trim().is_empty()
@@ -1185,7 +1375,7 @@ pub(crate) async fn validate_agent(pool: &SqlitePool, agent_id: &str) -> Result<
     }
 }
 
-async fn validate_agent_tx(
+pub(crate) async fn validate_agent_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     agent_id: &str,
 ) -> Result<(), String> {
@@ -1243,6 +1433,7 @@ pub(crate) fn task_from_input(
         project_id: input.project_id,
         model: input.model,
         effort: input.effort,
+        workspace_permission: input.workspace_permission,
         dependencies: input.dependencies,
         status: status.into(),
         reason,
@@ -1261,11 +1452,12 @@ pub(crate) async fn insert_task(
     parent: Option<&str>,
     delegation: Option<&str>,
 ) -> Result<(), String> {
-    sqlx::query("INSERT INTO tasks(id,agent_id,title,instructions,acceptance_criteria,context,cwd,project_id,model,effort,dependencies,status,reason,run_id,thread_id,result,evidence,parent_task_id,delegation_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+    sqlx::query("INSERT INTO tasks(id,agent_id,title,instructions,acceptance_criteria,context,cwd,project_id,model,effort,dependencies,status,reason,run_id,thread_id,result,evidence,parent_task_id,delegation_id,created_at,updated_at,workspace_permission,ticket_id,ticket_status_revision) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
         .bind(&task.id).bind(&task.agent_id).bind(&task.title).bind(&task.instructions)
         .bind(serde_json::to_string(&task.acceptance_criteria).map_err(serr)?).bind(&task.context).bind(&task.cwd).bind(&task.project_id).bind(&task.model).bind(&task.effort)
         .bind(serde_json::to_string(&task.dependencies).map_err(serr)?).bind(&task.status).bind(&task.reason).bind(&task.run_id).bind(&task.thread_id).bind(&task.result)
         .bind(task.evidence.as_ref().map(serde_json::to_string).transpose().map_err(serr)?).bind(parent).bind(delegation).bind(task.created_at).bind(task.updated_at)
+        .bind(task.workspace_permission.as_ref().map(|p| serde_json::to_string(p).unwrap_or_default())).bind(Option::<String>::None).bind(Option::<i64>::None)
         .execute(&mut **tx).await.map_err(err)?;
     Ok(())
 }
@@ -1285,6 +1477,11 @@ fn row_task(row: sqlx::sqlite::SqliteRow) -> Result<Task, String> {
         project_id: row.try_get("project_id").map_err(err)?,
         model: row.try_get("model").map_err(err)?,
         effort: row.try_get("effort").map_err(err)?,
+        workspace_permission: row
+            .try_get::<Option<String>, _>("workspace_permission")
+            .map_err(err)?
+            .map(parse)
+            .transpose()?,
         dependencies: parse(row.try_get::<String, _>("dependencies").map_err(err)?)?,
         status: row.try_get("status").map_err(err)?,
         reason: row.try_get("reason").map_err(err)?,
@@ -1301,7 +1498,7 @@ fn row_task(row: sqlx::sqlite::SqliteRow) -> Result<Task, String> {
     })
 }
 
-async fn get_task_tx(
+pub(crate) async fn get_task_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     id: &str,
 ) -> Result<Task, String> {
@@ -1436,7 +1633,7 @@ async fn maybe_resume_parent(
     Ok(())
 }
 
-async fn event(
+pub(crate) async fn event(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     kind: &str,
     entity: &str,

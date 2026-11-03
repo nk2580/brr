@@ -1,0 +1,22 @@
+.project-dialog-backdrop { position: fixed; inset: 0; z-index: 1000; display: grid; place-items: center; padding: 24px; background: rgb(0 0 0 / 58%); }
+.project-dialog { width: min(560px, 100%); max-height: min(720px, calc(100vh - 48px)); overflow: auto; padding: 20px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); color: var(--foreground); box-shadow: 0 20px 70px rgb(0 0 0 / 45%); font-family: var(--font-ui); outline: none; }
+.project-dialog-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 20px; }
+.project-dialog-header h2 { margin: 0; font-size: 18px; font-weight: 600; }
+.project-dialog-form { display: grid; gap: 18px; }
+.project-dialog-form > label, .project-dialog-defaults label { display: grid; gap: 7px; font-size: 13px; color: var(--foreground); }
+.project-dialog input:not([type="radio"]), .project-dialog select { width: 100%; min-width: 0; min-height: 36px; padding: 7px 10px; border: 1px solid var(--control-border); border-radius: 7px; background: var(--surface-high); color: inherit; font: inherit; }
+.project-dialog input:focus-visible, .project-dialog select:focus-visible, .project-dialog summary:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.project-dialog-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 13px; font-weight: 500; }
+.project-dialog-empty { margin: 10px 0 0; color: var(--muted); font-size: 12px; }
+.project-dialog-folders ul { display: grid; gap: 6px; margin: 10px 0 0; padding: 0; list-style: none; }
+.project-dialog-folders li { display: flex; align-items: center; gap: 10px; min-width: 0; padding: 5px 7px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface-high); }
+.project-dialog-primary { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; font-size: 11px; color: var(--muted); }
+.project-dialog-primary input { accent-color: var(--focus); margin: 0; }
+.project-dialog-path { flex: 1; min-width: 0; overflow-wrap: anywhere; color: var(--muted); font: 11px/1.45 var(--font-mono); }
+.project-dialog-defaults { border-top: 1px solid var(--border); padding-top: 13px; }
+.project-dialog-defaults summary { width: fit-content; cursor: pointer; font-size: 13px; font-weight: 500; }
+.project-dialog-defaults fieldset { display: grid; gap: 14px; min-width: 0; margin: 13px 0 0; padding: 0; border: 0; }
+.project-dialog-defaults fieldset > p { margin: 0; color: var(--muted); font-size: 12px; }
+.project-dialog-error { margin: 0; color: var(--danger); font-size: 12px; overflow-wrap: anywhere; }
+.project-dialog-actions { display: flex; flex-wrap: wrap; gap: 8px; padding-top: 2px; }
+@media (max-width: 600px) { .project-dialog-backdrop { padding: 12px; } .project-dialog { max-height: calc(100vh - 24px); padding: 16px; } }

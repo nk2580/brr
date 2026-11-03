@@ -6,6 +6,7 @@ async fn fixture() -> (tempfile::TempDir, Engine) {
     std::fs::write(&file, r#"
 import json,sys
 count=0
+last_tools={}
 for line in sys.stdin:
     m=json.loads(line)
     if 'id' not in m: continue
@@ -19,6 +20,10 @@ for line in sys.stdin:
         result={'thread':{'id':'interview-'+str(count),'cwd':p.get('cwd'),'turns':[]},'startParams':p}
     elif method=='thread/resume': result={'thread':{'id':p['threadId'],'turns':[]},'resumeParams':p}
     elif method=='thread/read': result={'thread':{'id':p['threadId'],'turns':[]},'readParams':p}
+    elif method=='thread/dynamicTools/replace':
+        last_tools[p['threadId']]=p['tools']
+        result={}
+    elif method=='test/last-tools': result=last_tools.get(p['threadId'],[])
     else: result={}
     print(json.dumps({'id':m['id'],'result':result}),flush=True)
 "#).unwrap();
@@ -26,6 +31,259 @@ for line in sys.stdin:
     command.arg(file).current_dir(dir.path());
     let engine = Engine::connect(command, Arc::new(|_| {})).await.unwrap();
     (dir, engine)
+}
+
+#[tokio::test]
+async fn ticket_tools_default_to_bound_project_and_derive_the_actor() {
+    let (directory, engine) = fixture().await;
+    let project_dir = directory.path().join("registered");
+    std::fs::create_dir_all(&project_dir).unwrap();
+    let project = engine
+        .agents
+        .projects
+        .create(crate::projects::ProjectInput {
+            name: "Registered".into(),
+            folders: vec![project_dir.to_string_lossy().into_owned()],
+            primary_folder: None,
+            model: None,
+            effort: None,
+            permission: None,
+        })
+        .await
+        .unwrap();
+    engine
+        .agents
+        .bind_baseline(
+            &json!({"id":"ticket-chat","cwd":"/unrelated/worktree"}),
+            Some(project.id.clone()),
+        )
+        .await
+        .unwrap();
+    let created = engine
+        .agents
+        .handle_tool(json!({
+            "threadId":"ticket-chat","callId":"create-1","tool":"brr_ticket_create",
+            "arguments":{"title":"Bound project default","description":"Ticket actor test"}
+        }))
+        .await
+        .unwrap();
+    assert_eq!(created["projectId"], project.id);
+    let detail = engine
+        .agents
+        .store
+        .read_ticket(created["id"].as_str().unwrap(), None, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        detail.activity.data[0].actor.kind,
+        brr_agent_core::TicketActorKind::Agent
+    );
+    assert_eq!(
+        detail.activity.data[0].actor.thread_id.as_deref(),
+        Some("ticket-chat")
+    );
+    assert!(engine
+        .agents
+        .handle_tool(json!({
+            "threadId":"ticket-chat","callId":"create-2","tool":"brr_ticket_create",
+            "arguments":{"projectId":"/unregistered","title":"Out of scope"}
+        }))
+        .await
+        .is_err());
+    engine.shutdown().await;
+}
+
+#[tokio::test]
+async fn stale_task_lease_cannot_mutate_a_ticket() {
+    use brr_agent_core::{SessionBinding, TaskInput};
+    let (directory, engine) = fixture().await;
+    let project_dir = directory.path().join("lease-project");
+    std::fs::create_dir_all(&project_dir).unwrap();
+    let project = engine
+        .agents
+        .projects
+        .create(crate::projects::ProjectInput {
+            name: "Lease project".into(),
+            folders: vec![project_dir.to_string_lossy().into_owned()],
+            primary_folder: None,
+            model: None,
+            effort: None,
+            permission: None,
+        })
+        .await
+        .unwrap();
+    let profile = json!({"name":"Lease agent","description":"test","instructions":"test","soul":"test","model":"test-model","effort":"medium"});
+    sqlx::query("INSERT INTO agent_profiles(id,revision,candidate,created_at,updated_at) VALUES('lease-agent',1,?,0,0)")
+        .bind(profile.to_string()).execute(engine.agents.store.pool()).await.unwrap();
+    let task = engine
+        .agents
+        .store
+        .create_task(TaskInput {
+            agent_id: "lease-agent".into(),
+            title: "Fence ticket tools".into(),
+            instructions: "No ticket write".into(),
+            acceptance_criteria: vec!["The stale lease is rejected".into()],
+            context: None,
+            cwd: Some(project_dir.to_string_lossy().into_owned()),
+            project_id: Some(project.id.clone()),
+            model: None,
+            effort: None,
+            workspace_permission: None,
+            dependencies: vec![],
+        })
+        .await
+        .unwrap();
+    let run = engine
+        .agents
+        .store
+        .claim_ready("ticket-test-worker")
+        .await
+        .unwrap()
+        .unwrap();
+    engine
+        .agents
+        .store
+        .bind_session(SessionBinding {
+            thread_id: "stale-task-thread".into(),
+            agent_id: Some("lease-agent".into()),
+            kind: "task".into(),
+            project_id: Some(project.id),
+            cwd: Some(
+                directory
+                    .path()
+                    .join("saved-worktree")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            task_run_id: Some(run.id),
+            learning_eligible: false,
+        })
+        .await
+        .unwrap();
+    let error = engine
+        .agents
+        .handle_tool(json!({
+            "threadId":"stale-task-thread","callId":"stale-1","brrHostLease":"old-lease",
+            "tool":"brr_ticket_create","arguments":{"title":"Must not exist"}
+        }))
+        .await
+        .unwrap_err();
+    assert!(error.contains("stale or stopped task lease"));
+    assert!(engine
+        .agents
+        .store
+        .list_tickets(&task.project_id.unwrap(), None, 20, None)
+        .await
+        .unwrap()
+        .data
+        .is_empty());
+    engine.shutdown().await;
+}
+
+#[tokio::test]
+async fn ticket_task_binding_keeps_stable_project_id_and_executes_in_selected_folder() {
+    let (directory, engine) = fixture().await;
+    let first = directory.path().join("first");
+    let second = directory.path().join("second");
+    std::fs::create_dir_all(&first).unwrap();
+    std::fs::create_dir_all(&second).unwrap();
+    let project = engine
+        .agents
+        .projects
+        .create(crate::projects::ProjectInput {
+            name: "Two folders".into(),
+            folders: vec![
+                first.to_string_lossy().into_owned(),
+                second.to_string_lossy().into_owned(),
+            ],
+            primary_folder: Some(first.to_string_lossy().into_owned()),
+            model: None,
+            effort: None,
+            permission: None,
+        })
+        .await
+        .unwrap();
+    let session = engine
+        .agents
+        .open_session(
+            None,
+            "task",
+            "fixture-model",
+            Some(second.to_string_lossy().as_ref()),
+            Some(&project.id),
+            false,
+            None,
+            Some(brr_agent_core::WorkspacePermission::WorkspaceWrite),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        session["thread"]["cwd"],
+        second.canonicalize().unwrap().to_string_lossy().as_ref()
+    );
+    assert_eq!(session["thread"]["brr"]["projectId"], project.id);
+    assert_eq!(session["thread"]["workspace"]["scopeProjectId"], project.id);
+    let stored = engine
+        .agents
+        .store
+        .session_binding(session["thread"]["id"].as_str().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(stored.project_id.as_deref(), Some(project.id.as_str()));
+    engine.shutdown().await;
+}
+
+#[tokio::test]
+async fn resumed_foreground_chats_refresh_owned_browser_tools_and_dispatch_with_trusted_binding() {
+    let (_dir, engine) = fixture().await;
+    engine
+        .agents
+        .bind_baseline(&json!({"id":"old-chat"}), None)
+        .await
+        .unwrap();
+    engine
+        .request("thread/resume", json!({"threadId":"old-chat"}))
+        .await
+        .unwrap();
+    let tools = engine
+        .raw("test/last-tools", json!({"threadId":"old-chat"}))
+        .await
+        .unwrap();
+    assert!(tools
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|tool| tool["name"] == "brr_browser"));
+    engine.set_browser_handler(Arc::new(|thread, args| {
+        Box::pin(async move { Ok(json!({"thread":thread,"args":args})) })
+    }));
+    let response = engine
+        .agents
+        .handle_tool(
+            json!({"threadId":"old-chat","tool":"brr_browser","arguments":{"action":"list"}}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response,
+        json!({"thread":"old-chat","args":{"action":"list"}})
+    );
+    assert!(engine
+        .agents
+        .handle_tool(
+            json!({"threadId":"unbound","tool":"brr_browser","arguments":{"action":"list"}})
+        )
+        .await
+        .is_err());
+    let interview = engine
+        .agents_request(
+            "agents.interview",
+            json!({"model":"test-model","effort":"medium"}),
+        )
+        .await
+        .unwrap();
+    assert!(engine.agents.handle_tool(json!({"threadId":interview["thread"]["id"],"tool":"brr_browser","arguments":{"action":"list"}})).await.unwrap_err().contains("unavailable"));
+    engine.shutdown().await;
 }
 
 #[tokio::test]

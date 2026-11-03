@@ -433,6 +433,12 @@ fn task_input_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<TaskInput, Strin
         project_id: row.try_get("project_id").map_err(err)?,
         model: row.try_get("model").map_err(err)?,
         effort: row.try_get("effort").map_err(err)?,
+        workspace_permission: row
+            .try_get::<Option<String>, _>("workspace_permission")
+            .map_err(err)?
+            .map(|v| serde_json::from_str(&v))
+            .transpose()
+            .map_err(err)?,
         dependencies: serde_json::from_str(&row.try_get::<String, _>("dependencies").map_err(err)?)
             .map_err(err)?,
     })

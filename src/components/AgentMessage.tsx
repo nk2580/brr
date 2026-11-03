@@ -1,10 +1,16 @@
+import { useRef, useState, type ReactNode } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type { AgentItem } from '../lib/session';
 import { extractMcpAppInvocation } from '../lib/mcp-app';
 import { McpApp } from './McpApp';
+import { IntelligentUi } from './IntelligentUi';
+import { validateUiDocument, type UiIdentity, type UiActionReview } from '../lib/intelligent-ui';
+import { previewUiDocument } from '../lib/intelligent-ui-stream';
 
-type AgentMessageProps = { item: AgentItem; threadId?: string; onUsePrompt?: (text: string) => void };
+type AgentMessageProps = { item: AgentItem; threadId?: string; onUsePrompt?: (text: string) => void;
+  onExpandUi?: (identity: UiIdentity, title: string) => void; onUiReview?: (review: UiActionReview) => void;
+  expandedUiCallId?: string; uiActive?: boolean };
 
 function stringField(item: AgentItem, field: string): string | undefined {
   const value = item[field];
@@ -26,8 +32,18 @@ function userText(item: AgentItem): string {
   }).filter(Boolean).join('\n');
 }
 
+function CodeBlock({ children }: { children?: ReactNode }) {
+  const code = useRef<HTMLPreElement>(null);
+  const [status, setStatus] = useState('');
+  const copy = async () => {
+    try { await navigator.clipboard.writeText(code.current?.textContent ?? ''); setStatus('Copied'); }
+    catch { setStatus('Copy unavailable'); }
+  };
+  return <div className="agent-code-block"><button type="button" aria-label="Copy code" onClick={() => void copy()}>Copy code</button><pre ref={code}>{children}</pre>{status && <span role="status">{status}</span>}</div>;
+}
+
 function Markdown({ children }: { children: string }) {
-  return <div className="agent-markdown"><ReactMarkdown remarkPlugins={[remarkGfm]}>{children}</ReactMarkdown></div>;
+  return <div className="agent-markdown"><ReactMarkdown remarkPlugins={[remarkGfm]} components={{pre: ({children}) => <CodeBlock>{children}</CodeBlock>}}>{children}</ReactMarkdown></div>;
 }
 
 function activityLabel(item: AgentItem): string {
@@ -58,7 +74,21 @@ function readableType(type: string): string {
   return type.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/^./, (letter) => letter.toUpperCase());
 }
 
-export function AgentMessage({ item, threadId, onUsePrompt }: AgentMessageProps) {
+export function AgentMessage({ item, threadId, onUsePrompt, onExpandUi, onUiReview, expandedUiCallId, uiActive = true }: AgentMessageProps) {
+  if (item.type === 'dynamicToolCall' && item.tool === 'brr_ui_render') {
+    const validated = validateUiDocument(item.arguments);
+    const draft = validated.ok ? validated.document : typeof item.argumentsText === 'string' ? previewUiDocument(item.argumentsText) : null;
+    const identity = {threadId: threadId ?? '', callId: item.id};
+    const succeeded = item.status === 'completed' && item.success === true;
+    const preview = item.status === 'inProgress';
+    const fallback = draft?.text ?? (item.arguments && typeof item.arguments === 'object' && typeof (item.arguments as any).text === 'string' ? (item.arguments as any).text : 'Interactive response unavailable.');
+    if (!threadId || (!succeeded && !preview)) return <article className="agent-message agent-message-agent"><Markdown>{fallback}</Markdown></article>;
+    if (expandedUiCallId === item.id) return <article className="agent-message agent-message-agent"><button type="button" onClick={() => onExpandUi?.(identity, draft?.title ?? 'Interactive response')}>Open expanded response</button></article>;
+    return <article className="agent-message agent-message-agent" data-item-type="intelligentUi">
+      {succeeded ? <IntelligentUi identity={identity} active={uiActive} onExpand={onExpandUi ? () => onExpandUi(identity, draft?.title ?? 'Interactive response') : undefined} onReview={onUiReview} />
+        : draft ? <IntelligentUi identity={identity} document={draft} preview active={uiActive} /> : <p role="status">Building interactive response…</p>}
+    </article>;
+  }
   if (item.type === 'userMessage') {
     return (
       <article className="agent-message agent-message-user" data-item-type={item.type} style={{ display: 'flex', justifyContent: 'flex-end' }}>

@@ -27,6 +27,7 @@ use codex_app_server_protocol::SandboxMode;
 use codex_app_server_protocol::SandboxPolicy;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::SessionSource;
+use codex_app_server_protocol::Thread;
 use codex_app_server_protocol::ThreadAttachmentAddParams;
 use codex_app_server_protocol::ThreadAttachmentAddResponse;
 use codex_app_server_protocol::ThreadAttachmentListParams;
@@ -82,6 +83,7 @@ use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::protocol::TurnStartedEvent;
 use codex_protocol::protocol::UserMessageEvent;
+use codex_rollout::CompactedItem;
 use codex_rollout::RolloutItem;
 use codex_rollout::RolloutLine;
 use codex_rollout::RolloutRecorder;
@@ -141,6 +143,21 @@ async fn list_threads(mcp: &mut TestAppServer) -> Result<ThreadListResponse> {
     )
     .await??;
     to_response::<ThreadListResponse>(list_resp)
+}
+
+fn has_turn_user_message(thread: &Thread, turn_id: &str, expected_text: &str) -> bool {
+    thread
+        .turns
+        .iter()
+        .find(|turn| turn.id == turn_id)
+        .is_some_and(|turn| {
+            turn.items.iter().any(|item| match &item.payload {
+                ThreadItemPayload::UserMessage { content, .. } => content.iter().any(
+                    |input| matches!(input, UserInput::Text { text, .. } if text == expected_text),
+                ),
+                _ => false,
+            })
+        })
 }
 
 #[tokio::test]
@@ -1731,6 +1748,250 @@ async fn thread_fork_creates_reference_backed_paginated_thread() -> Result<()> {
         .await
         .is_err()
     );
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg(feature = "brr-runtime")]
+async fn brr_paginated_fork_copies_selected_history_for_cold_restart_discovery() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+
+    let conversation_id = create_fake_paginated_rollout(
+        codex_home.path(),
+        "2025-01-05T12-00-00",
+        "2025-01-05T12:00:00Z",
+        "Saved user message",
+        Some("mock_provider"),
+        /*git_info*/ None,
+    )?;
+    let source_path = rollout_path(
+        codex_home.path(),
+        "2025-01-05T12-00-00",
+        conversation_id.as_str(),
+    );
+    let source_id = ThreadId::from_string(conversation_id.as_str())?;
+    let completed_user_item = |turn_id: &str, id: &str, text: &str, at_ms| {
+        RolloutItem::EventMsg(EventMsg::ItemCompleted(ItemCompletedEvent {
+            thread_id: source_id,
+            turn_id: turn_id.to_string(),
+            item: CoreTurnItem::UserMessage(UserMessageItem {
+                id: id.to_string(),
+                client_id: None,
+                content: vec![codex_protocol::user_input::UserInput::Text {
+                    text: text.to_string(),
+                    text_elements: Vec::new(),
+                }],
+            }),
+            started_at_ms: Some(at_ms),
+            completed_at_ms: at_ms,
+        }))
+    };
+    append_rollout_item_to_path(
+        source_path.as_path(),
+        &RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+            turn_attribution: None,
+            turn_id: "turn-before-compaction".to_string(),
+            root_turn_id: None,
+            trace_id: None,
+            started_at: Some(1),
+            model_context_window: None,
+            collaboration_mode_kind: Default::default(),
+        })),
+    )
+    .await?;
+    append_rollout_item_to_path(
+        source_path.as_path(),
+        &completed_user_item(
+            "turn-before-compaction",
+            "user-before-compaction",
+            "Pre-compaction user message",
+            1_000,
+        ),
+    )
+    .await?;
+    append_rollout_item_to_path(
+        source_path.as_path(),
+        &RolloutItem::ResponseItem(
+            codex_protocol::models::ResponseItem::Message {
+                status: None,
+                encrypted_content: None,
+                id: None,
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: "Pre-compaction user message".to_string(),
+                }],
+                phase: None,
+                internal_chat_message_metadata_passthrough: None,
+            }
+            .into(),
+        ),
+    )
+    .await?;
+    append_rollout_item_to_path(
+        source_path.as_path(),
+        &RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
+            root_turn_id: None,
+            turn_id: "turn-before-compaction".to_string(),
+            last_agent_message: None,
+            error: None,
+            started_at: Some(1),
+            completed_at: Some(2),
+            duration_ms: Some(1_000),
+            time_to_first_token_ms: None,
+        })),
+    )
+    .await?;
+    append_rollout_item_to_path(
+        source_path.as_path(),
+        &RolloutItem::Compacted(Box::new(CompactedItem {
+            message: "Compaction boundary".to_string(),
+            replacement_history: Some(Vec::new()),
+            retained_context: None,
+            guardian_history: None,
+            mcp_resource_origins: None,
+            window_number: Some(1),
+            first_window_id: None,
+            previous_window_id: None,
+            window_id: None,
+            compaction_response_id: None,
+            latest_token_usage_record: None,
+            resume_metadata: None,
+        })),
+    )
+    .await?;
+    for item in [
+        RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+            turn_attribution: None,
+            turn_id: "turn-1".to_string(),
+            root_turn_id: None,
+            trace_id: None,
+            started_at: Some(10),
+            model_context_window: None,
+            collaboration_mode_kind: Default::default(),
+        })),
+        completed_user_item(
+            "turn-1",
+            "user-after-compaction",
+            "Post-compaction user message",
+            10_000,
+        ),
+        RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
+            root_turn_id: None,
+            turn_id: "turn-1".to_string(),
+            last_agent_message: None,
+            error: None,
+            started_at: Some(10),
+            completed_at: Some(20),
+            duration_ms: Some(10_000),
+            time_to_first_token_ms: None,
+        })),
+    ] {
+        append_rollout_item_to_path(source_path.as_path(), &item).await?;
+    }
+
+    let brr_runtime = std::path::Path::new(env!("CARGO_BIN_EXE_brr-runtime"));
+    let mut mcp = TestAppServer::builder()
+        .with_program(brr_runtime)
+        .with_plugin_startup_tasks()
+        .with_codex_home(codex_home.path())
+        .without_auto_env()
+        .build_initialized()
+        .await?;
+    let fork_id = mcp
+        .send_thread_fork_request(ThreadForkParams {
+            thread_id: conversation_id,
+            brr_copy_history: true,
+            ..Default::default()
+        })
+        .await?;
+    let ThreadForkResponse {
+        thread: forked_thread,
+        ..
+    } = timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(fork_id)).await??;
+    assert!(!forked_thread.preview.trim().is_empty());
+    assert!(forked_thread.turns.iter().any(|turn| turn.id == "turn-1"));
+    assert!(
+        forked_thread
+            .turns
+            .iter()
+            .any(|turn| turn.id == "turn-before-compaction")
+    );
+    assert!(has_turn_user_message(
+        &forked_thread,
+        "turn-before-compaction",
+        "Pre-compaction user message"
+    ));
+    assert!(has_turn_user_message(
+        &forked_thread,
+        "turn-1",
+        "Post-compaction user message"
+    ));
+    let forked_thread_id = forked_thread.id.clone();
+    let forked_path = forked_thread.path.expect("forked rollout path");
+    let persisted_fork = std::fs::read_to_string(forked_path.as_path())?;
+    assert!(persisted_fork.contains("Pre-compaction user message"));
+    assert!(persisted_fork.contains("Compaction boundary"));
+    assert!(persisted_fork.contains("Saved user message"));
+    assert!(
+        read_session_meta_line(forked_path.as_path())
+            .await?
+            .meta
+            .history_base
+            .is_none()
+    );
+
+    let status = mcp.shutdown_gracefully().await?;
+    assert!(status.success());
+    drop(mcp);
+
+    let mut restarted = TestAppServer::builder()
+        .with_program(brr_runtime)
+        .with_plugin_startup_tasks()
+        .with_codex_home(codex_home.path())
+        .without_auto_env()
+        .build_initialized()
+        .await?;
+    let listed = list_threads(&mut restarted).await?;
+    assert!(
+        listed
+            .data
+            .iter()
+            .any(|thread| thread.id == forked_thread_id)
+    );
+
+    let read_id = restarted
+        .send_thread_read_request(ThreadReadParams {
+            thread_id: forked_thread_id,
+            include_turns: true,
+        })
+        .await?;
+    let read: ThreadReadResponse =
+        timeout(DEFAULT_READ_TIMEOUT, restarted.read_response(read_id)).await??;
+    assert!(
+        read.thread
+            .turns
+            .iter()
+            .any(|turn| turn.id == "turn-before-compaction")
+    );
+    assert!(read.thread.turns.iter().any(|turn| turn.id == "turn-1"));
+    assert!(!read.thread.preview.trim().is_empty());
+    assert!(has_turn_user_message(
+        &read.thread,
+        "turn-before-compaction",
+        "Pre-compaction user message"
+    ));
+    assert!(has_turn_user_message(
+        &read.thread,
+        "turn-1",
+        "Post-compaction user message"
+    ));
+    let response_requests = server
+        .received_requests()
+        .await
+        .expect("wiremock request journal should be available");
+    assert!(response_requests.is_empty());
     Ok(())
 }
 

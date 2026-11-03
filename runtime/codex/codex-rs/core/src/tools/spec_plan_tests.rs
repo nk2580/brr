@@ -63,6 +63,53 @@ use crate::tools::spec_plan::build_core_tool_registry;
 
 const MULTI_AGENT_V2_NAMESPACE: &str = "collaboration";
 
+#[cfg(feature = "brr-runtime")]
+#[tokio::test]
+async fn brr_ui_renderer_is_host_enabled_and_reserves_its_name() {
+    let disabled_probe = probe_with(|_| {}, ToolPlanInputs::default()).await;
+    assert!(
+        !disabled_probe
+            .registered_names
+            .iter()
+            .any(|name| name == "brr_ui_render")
+    );
+
+    let dynamic_collision =
+        DynamicToolSpec::Function(codex_protocol::dynamic_tools::DynamicToolFunctionSpec {
+            name: "brr_ui_render".to_string(),
+            description: "untrusted replacement".to_string(),
+            input_schema: json!({"type": "object"}),
+            defer_loading: false,
+        });
+    let probe = probe_with(
+        |turn| Arc::make_mut(&mut turn.config).brr_ui_enabled = true,
+        ToolPlanInputs {
+            dynamic_tools: vec![dynamic_collision],
+            ..ToolPlanInputs::default()
+        },
+    )
+    .await;
+
+    assert_eq!(
+        probe
+            .registered_names
+            .iter()
+            .filter(|name| name.as_str() == "brr_ui_render")
+            .count(),
+        1
+    );
+    let ToolSpec::Function(spec) = probe.visible_spec("brr_ui_render") else {
+        panic!("the Brr renderer should be a fixed function tool");
+    };
+    assert!(spec.description.contains("Prefer plain text"));
+    assert_eq!(spec.parameters["additionalProperties"], false);
+    assert_eq!(
+        spec.parameters["allOf"][0]["then"]["required"][0],
+        "components"
+    );
+    assert_eq!(spec.parameters["allOf"][1]["then"]["required"][0], "html");
+}
+
 #[derive(Default)]
 struct ToolPlanInputs {
     tool_runtimes: Vec<RegisteredTool>,
@@ -919,6 +966,14 @@ async fn request_user_input_tool_respects_experimental_config_gate() {
     .await;
     disabled.assert_visible_lacks(&["request_user_input"]);
     disabled.assert_registered_lacks(&["request_user_input"]);
+}
+
+#[cfg(feature = "brr-runtime")]
+#[tokio::test]
+async fn brr_registers_async_user_input_without_model_catalog_advertisement() {
+    let plan = probe(|_| {}).await;
+    plan.assert_visible_contains(&["request_user_input", "request_user_input_async"]);
+    plan.assert_registered_contains(&["request_user_input", "request_user_input_async"]);
 }
 
 #[tokio::test]

@@ -1,7 +1,9 @@
 mod memory;
 mod profiles;
+mod questions;
 mod schedule;
 mod tasks;
+mod tickets;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -14,9 +16,18 @@ use uuid::Uuid;
 
 pub use memory::{LearnedSkill, MemoryAccess, MemoryRecord, MemoryScope, MemorySource};
 pub use profiles::{AgentProfile, ProfileCandidate, ProfileDraft, SessionBinding};
+pub use questions::{
+    NewQuestionRequest, Question, QuestionAnswers, QuestionOption, QuestionRequest,
+};
 pub use schedule::{Workflow, WorkflowInput};
 pub use tasks::{
     DelegationNode, DelegationProposal, Task, TaskAction, TaskInput, TaskRun, TaskSettings,
+    WorkspacePermission,
+};
+pub use tickets::{
+    AcceptanceCriterion, NewAcceptanceCriterion, Ticket, TicketActivity, TicketActor,
+    TicketActorKind, TicketComment, TicketDetail, TicketFilter, TicketInput, TicketMutation,
+    TicketPage, TicketPriority, TicketRunProposal, TicketRunSummary, TicketStatus, TicketUpdate,
 };
 
 #[derive(Clone)]
@@ -63,6 +74,8 @@ impl AgentStore {
         profiles::init(&pool).await?;
         memory::init(&pool).await?;
         tasks::init(&pool).await?;
+        tickets::init(&pool).await?;
+        questions::init(&pool).await?;
         schedule::init(&pool).await?;
         Ok(Self {
             pool,

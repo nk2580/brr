@@ -95,9 +95,9 @@ use codex_model_provider::ProviderCapabilities;
 use codex_model_provider_info::GCP_PROVIDER_ID;
 use codex_model_provider_info::LEGACY_OLLAMA_CHAT_PROVIDER_ID;
 use codex_model_provider_info::ModelProviderInfo;
+use codex_model_provider_info::OLLAMA_CHAT_PROVIDER_REMOVED_ERROR;
 #[cfg(feature = "brr-runtime")]
 use codex_model_provider_info::OPENAI_PROVIDER_ID;
-use codex_model_provider_info::OLLAMA_CHAT_PROVIDER_REMOVED_ERROR;
 use codex_model_provider_info::built_in_model_providers;
 use codex_model_provider_info::merge_configured_model_providers;
 use codex_models_manager::ModelsManagerConfig;
@@ -1134,6 +1134,9 @@ pub struct Config {
 
     /// Whether to register the update_plan tool.
     pub update_plan_enabled: bool,
+
+    /// Whether to register the host-owned Brr Intelligent UI renderer.
+    pub brr_ui_enabled: bool,
 
     /// Policy for collecting and validating tool runtimes.
     pub tool_registry: ToolRegistryConfig,
@@ -2833,6 +2836,14 @@ fn resolve_update_plan_enabled(config_toml: &ConfigToml) -> bool {
         .is_some_and(|config| config.enabled)
 }
 
+fn resolve_brr_ui_enabled(config_toml: &ConfigToml) -> bool {
+    config_toml
+        .tools
+        .as_ref()
+        .and_then(|tools| tools.brr_ui.as_ref())
+        .is_some_and(|config| config.enabled)
+}
+
 fn resolve_feature_enabled(feature: Option<&codex_config::config_toml::FeatureToggleToml>) -> bool {
     feature.and_then(|feature| feature.enabled).unwrap_or(true)
 }
@@ -4009,6 +4020,7 @@ impl Config {
         let experimental_request_user_input_enabled =
             resolve_experimental_request_user_input_enabled(&cfg);
         let update_plan_enabled = resolve_update_plan_enabled(&cfg);
+        let brr_ui_enabled = resolve_brr_ui_enabled(&cfg);
         let tool_registry = ToolRegistryConfig {
             error_on_tool_collisions: cfg
                 .features
@@ -4750,6 +4762,7 @@ impl Config {
             web_search_config,
             experimental_request_user_input_enabled,
             update_plan_enabled,
+            brr_ui_enabled,
             tool_registry,
             code_mode,
             background_terminal_max_timeout,

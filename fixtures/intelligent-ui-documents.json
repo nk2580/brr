@@ -1,0 +1,35 @@
+[
+  {
+    "name": "native with text and action",
+    "valid": true,
+    "document": {
+      "version": 1,
+      "kind": "native",
+      "title": "Status",
+      "text": "Everything is ready",
+      "initialState": {},
+      "actions": [{"id": "continue", "label": "Continue", "prompt": "Continue with the selected option."}],
+      "components": [{"id": "message", "type": "text", "text": "Ready"}, {"id": "next", "type": "button", "label": "Continue", "actionId": "continue"}]
+    }
+  },
+  {
+    "name": "self-contained app",
+    "valid": true,
+    "document": {"version": 1, "kind": "app", "title": "Canvas", "text": "A blank canvas", "initialState": {}, "actions": [], "html": "<!doctype html><p>Canvas</p>"}
+  },
+  {
+    "name": "reject model supplied identity fields",
+    "valid": false,
+    "document": {"version": 1, "kind": "native", "title": "Status", "text": "Ready", "initialState": {}, "actions": [], "components": [], "threadId": "forbidden"}
+  },
+  {
+    "name": "reject unknown action references",
+    "valid": false,
+    "document": {"version": 1, "kind": "native", "title": "Status", "text": "Ready", "initialState": {}, "actions": [], "components": [{"id": "next", "type": "button", "label": "Continue", "actionId": "missing"}]}
+  },
+  {
+    "name": "require bound initial state",
+    "valid": false,
+    "document": {"version": 1, "kind": "native", "title": "Mode", "text": "Choose a mode", "initialState": {}, "actions": [], "components": [{"id": "mode", "type": "select", "label": "Mode", "stateKey": "mode", "options": [{"label": "Fast", "value": "fast"}]}]}
+  }
+]

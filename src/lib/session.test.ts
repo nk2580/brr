@@ -173,17 +173,13 @@ describe('session event reduction', () => {
     expect(state).toMatchObject({ status: 'idle', approvals: [] });
   });
 
-  it('tracks tool user-input requests as approvals and clears them on resolution', () => {
+  it('keeps tool user-input requests out of approval state for the durable question flow', () => {
     let state = reduceSession(initialSession('thread-1'), {
       method: 'item/tool/requestUserInput',
       id: 'input-approval',
       params: { threadId: 'thread-1', turnId: 'turn-1', itemId: 'question-1', questions: [] },
     });
-    expect(state.approvals).toEqual([{
-      id: 'input-approval',
-      method: 'item/tool/requestUserInput',
-      params: { threadId: 'thread-1', turnId: 'turn-1', itemId: 'question-1', questions: [] },
-    }]);
+    expect(state.approvals).toEqual([])
 
     state = reduceSession(state, {
       method: 'serverRequest/resolved',
@@ -275,6 +271,28 @@ describe('session event reduction', () => {
       status: 'interrupted',
       items: [{ id: 'command-1', status: 'completed', exitCode: 130 }],
     });
+    expect(state.items[0]?.turnStatus).toBe('interrupted');
+  });
+
+  it('marks an interrupted older turn when its completion arrives after the next turn starts', () => {
+    let state = reduceSession(initialSession('thread-1'), {
+      method: 'turn/started',
+      params: { threadId: 'thread-1', turn: { id: 'turn-stop', status: 'inProgress', items: [] } },
+    });
+    state = reduceSession(state, {
+      method: 'item/started',
+      params: { threadId: 'thread-1', turnId: 'turn-stop', item: { id: 'reasoning-stop', type: 'reasoning', text: 'work' } },
+    });
+    state = reduceSession(state, {
+      method: 'turn/started',
+      params: { threadId: 'thread-1', turn: { id: 'turn-next', status: 'inProgress', items: [] } },
+    });
+    state = reduceSession(state, {
+      method: 'turn/completed',
+      params: { threadId: 'thread-1', turn: { id: 'turn-stop', status: 'interrupted', items: [] } },
+    });
+    expect(state.turnId).toBe('turn-next')
+    expect(state.items.find(item => item.id === 'reasoning-stop')?.turnStatus).toBe('interrupted')
   });
 
   it('does not let a prior turn item event replace the active turn', () => {
@@ -301,7 +319,7 @@ describe('session event reduction', () => {
     });
 
     expect(state).toMatchObject({ turnId: 'turn-current', status: 'running' });
-    expect(state.items).toContainEqual({ id: 'old-command', type: 'commandExecution', status: 'inProgress' });
+    expect(state.items).toContainEqual({ id: 'old-command', type: 'commandExecution', status: 'inProgress', turnId: 'turn-old' });
   });
 
   it('keeps active turn metadata when scoped events from a prior turn arrive late', () => {
@@ -487,4 +505,18 @@ describe('session event reduction', () => {
       ],
     });
   });
+});
+
+it('retains the owning turn for both loaded and streamed items', () => {
+  const loaded = hydrateThread({id:'chat', turns:[{id:'old',status:'completed',items:[{id:'first',type:'userMessage',text:'First'}]}]})
+  expect(loaded.items[0].turnId).toBe('old')
+  const live = reduceSession(loaded,{method:'item/agentMessage/delta',params:{threadId:'chat',turnId:'new',itemId:'answer',delta:'Hello'}})
+  expect(live.items.find(item=>item.id==='answer')?.turnId).toBe('new')
+})
+
+it('completes streamed work even when the completion snapshot omits items', () => {
+  let state = reduceSession(initialSession('chat'), {method:'turn/started',params:{threadId:'chat',turn:{id:'a',status:'inProgress',items:[]}}});
+  state = reduceSession(state, {method:'item/started',params:{threadId:'chat',turnId:'a',item:{id:'work',type:'commandExecution',status:'inProgress'}}});
+  state = reduceSession(state, {method:'turn/completed',params:{threadId:'chat',turn:{id:'a',status:'completed',items:[]}}});
+  expect(state.items.find(item => item.id === 'work')?.turnStatus).toBe('completed');
 });

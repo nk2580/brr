@@ -12,7 +12,7 @@ path = "src/lib.rs"
 workspace = true
 
 [features]
-brr-runtime = []
+brr-runtime = ["codex-api/brr-runtime", "codex-otel/brr-runtime"]
 
 [dependencies]
 brr-runtime-policy = { path = "../../brr/policy" }

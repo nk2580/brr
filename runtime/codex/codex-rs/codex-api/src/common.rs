@@ -113,6 +113,12 @@ pub enum ResponseEvent {
         call_id: Option<String>,
         delta: String,
     },
+    #[cfg(feature = "brr-runtime")]
+    FunctionCallArgumentsDelta {
+        item_id: String,
+        call_id: Option<String>,
+        delta: String,
+    },
     ReasoningSummaryDelta {
         delta: String,
         summary_index: i64,

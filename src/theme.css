@@ -1,0 +1,48 @@
+/* Brr's public-site identity, shared by every app-owned surface. */
+@font-face {
+  font-family: Archivo;
+  src: url('/assets/fonts/archivo-latin.woff2') format('woff2');
+  font-style: normal;
+  font-weight: 400 900;
+  font-display: swap;
+}
+
+:root {
+  color-scheme: dark;
+  --font-ui: Archivo, Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --background: oklch(16% .006 305);
+  --foreground: oklch(96% .008 88);
+  --muted: oklch(75% .009 305);
+  --surface: oklch(21% .007 305);
+  --surface-high: oklch(27% .008 305);
+  --surface-hover: oklch(31% .008 305);
+  --surface-selected: oklch(34% .008 305);
+  --border: oklch(34% .008 305);
+  --control-border: oklch(55% .009 305);
+  --accent: var(--foreground);
+  --accent-foreground: var(--background);
+  --focus: var(--accent);
+  --primary-background: var(--foreground);
+  --primary-foreground: var(--background);
+  --primary-hover: oklch(90% .008 88);
+  --danger: oklch(82% .1 30);
+  --danger-background: color-mix(in oklch, var(--surface) 88%, var(--danger));
+  --danger-border: color-mix(in oklch, var(--surface) 40%, var(--danger));
+  --warning: oklch(84% .12 65);
+  --warning-background: color-mix(in oklch, var(--surface) 88%, var(--warning));
+  --warning-border: color-mix(in oklch, var(--surface) 40%, var(--warning));
+  --success: oklch(82% .12 145);
+  --success-background: color-mix(in oklch, var(--surface) 88%, var(--success));
+  --success-border: color-mix(in oklch, var(--surface) 40%, var(--success));
+  --link: var(--foreground);
+  --code-background: var(--background);
+  --shadow: 0 8px 28px oklch(8% .006 305 / .4);
+  --radius: .75rem;
+  font-family: var(--font-ui);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  color: var(--foreground);
+  background: var(--background);
+}

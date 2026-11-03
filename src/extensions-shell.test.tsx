@@ -4,6 +4,7 @@ import { expect, it, vi } from 'vitest'
 import App from './App'
 
 vi.mock('./lib/client', () => ({isDesktop:()=>true, client:{
+  projects: vi.fn(async () => ({data: []})),
   subscribe:async()=>()=>{},
   connect:async()=>({account:null,models:[],threads:[]}),
 }}))

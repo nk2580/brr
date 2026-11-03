@@ -1722,6 +1722,7 @@ pub enum EventMsg {
     HookCompleted(HookCompletedEvent),
 
     AgentMessageContentDelta(AgentMessageContentDeltaEvent),
+    BrrUiArgumentsDelta(BrrUiArgumentsDeltaEvent),
     PlanDelta(PlanDeltaEvent),
     ReasoningContentDelta(ReasoningContentDeltaEvent),
     ReasoningRawContentDelta(ReasoningRawContentDeltaEvent),
@@ -2196,6 +2197,18 @@ pub struct AgentMessageContentDeltaEvent {
     pub thread_id: String,
     pub turn_id: String,
     pub item_id: String,
+    pub delta: String,
+}
+
+/// Incremental arguments for the Brr-owned Intelligent UI renderer call.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
+pub struct BrrUiArgumentsDeltaEvent {
+    pub thread_id: String,
+    pub turn_id: String,
+    pub item_id: String,
+    pub call_id: String,
     pub delta: String,
 }
 

@@ -1,0 +1,11 @@
+# Terminal responsiveness
+
+The reported sluggish terminal reproduced as 150 ms between input and an already-available echo in the component scheduling test. The fixed output-read timer was the first cause. A separate native regression reproduced blocked input holding the shared terminal registry lock, preventing resize and close.
+
+Visible terminals now wait for native PTY output with a bounded asynchronous read instead of sleeping between responses. The native reader registers its notification before inspecting the buffer, so arriving output cannot be missed. Idle reads time out after at most one second; an empty-response safety retry is 16 ms. Hidden tabs stop requesting output and retain their cursor for catch-up.
+
+Replies carry at most 64 KiB and acknowledge only bytes actually emitted. Each reply is combined into one xterm write; the next request waits for its parser callback. Final exit is reported only after the reader reaches EOF and the remaining buffer is drained. The existing 1 MiB history cap remains bounded and reports trimmed history.
+
+Input is serialized per PTY, coalesced within a microtask, and pasted text is split at UTF-8 boundaries within the native 16 KiB input limit. Blocking writes use a per-terminal writer lock on a blocking worker, outside the shared registry. Close removes the session and kills the child off the async executor. It must dispatch immediately even when a write is pending, since killing the child may be necessary to unblock that write. Queued input is discarded on close or root change. Pending reads cannot write into a replaced terminal or advance a different project's cursor.
+
+Verification observed RED before the latency and native-lock fixes. Current focused results: 33 workspace component tests, 11 native workspace tests, and Sol review clear. The deterministic echo regression stays within 50 ms. Native PTY input became available in less than 1 ms in the local test; the 20,000-line burst drained in approximately 66 ms. Those are separate component and native-service measurements, not a measurement of native screen-render latency. Packaging and interactive acceptance are recorded in evidence/workspace-tools/terminal-performance-verification.json.

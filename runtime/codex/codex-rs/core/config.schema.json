@@ -646,6 +646,16 @@
       },
       "type": "object"
     },
+    "BrrUiToolConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
     "BundledSkillsConfig": {
       "additionalProperties": false,
       "properties": {
@@ -5173,6 +5183,9 @@
     "ToolsToml": {
       "additionalProperties": false,
       "properties": {
+        "brr_ui": {
+          "$ref": "#/definitions/BrrUiToolConfig"
+        },
         "experimental_request_user_input": {
           "$ref": "#/definitions/ExperimentalRequestUserInput"
         },

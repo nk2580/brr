@@ -70,6 +70,7 @@ use codex_prompts::ResolvedModelMessages;
 use codex_protocol::DEFAULT_FUNCTION_NAMESPACE;
 use codex_protocol::account::PlanType;
 use codex_protocol::config_types::WebSearchMode;
+use codex_protocol::dynamic_tools::DynamicToolFunctionSpec;
 use codex_protocol::dynamic_tools::DynamicToolNamespaceTool;
 use codex_protocol::dynamic_tools::DynamicToolSpec;
 use codex_protocol::error::CodexErrorDetails;
@@ -103,6 +104,7 @@ use tracing::instrument;
 
 const IMAGE_GEN_NAMESPACE: &str = "image_gen";
 const IMAGEGEN_TOOL_NAME: &str = "imagegen";
+const BRR_UI_RENDER_TOOL_NAME: &str = "brr_ui_render";
 
 #[derive(Clone, Copy)]
 struct CoreToolPlanContext<'a> {
@@ -173,6 +175,7 @@ pub(crate) fn build_tool_router(
         &mut registry,
     );
     append_dynamic_tool_runtimes(dynamic_tools, &mut registry);
+    append_brr_ui_renderer(turn_context, &mut registry);
     let hosted_specs = hosted_model_tool_specs(
         turn_context,
         model_info,
@@ -316,6 +319,7 @@ pub(crate) fn build_core_tool_registry(
     };
     let mut registry = ToolRegistry::default();
     add_core_tool_sources(&context, &mut registry);
+    append_brr_ui_renderer(turn_context, &mut registry);
     registry
 }
 
@@ -341,6 +345,7 @@ pub(crate) fn append_source_tools(
         registry,
     );
     append_dynamic_tool_runtimes(dynamic_tools, registry);
+    append_brr_ui_renderer(turn_context, registry);
     hosted_model_tool_specs(
         turn_context,
         model_info,
@@ -1317,7 +1322,14 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
     if turn_context.config.experimental_request_user_input_enabled {
         registry.add_with_exposure(
             RequestUserInputHandler {
-                available_modes: request_user_input_available_modes(features),
+                available_modes: if cfg!(feature = "brr-runtime") {
+                    vec![
+                        codex_protocol::config_types::ModeKind::Default,
+                        codex_protocol::config_types::ModeKind::Plan,
+                    ]
+                } else {
+                    request_user_input_available_modes(features)
+                },
             },
             ToolExposure::DirectModelOnly,
         );
@@ -1325,27 +1337,36 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
 
     if turn_context.config.experimental_request_user_input_enabled
         && !turn_context.session_source.is_non_root_agent()
-        && context
-            .model_info
-            .experimental_supported_tools
-            .iter()
-            // Existing model catalogs still advertise the previous name.
-            .any(|tool| {
-                matches!(
-                    tool.as_str(),
-                    "request_user_input_async" | "send_user_message_async"
-                )
-            })
+        && (cfg!(feature = "brr-runtime")
+            || context
+                .model_info
+                .experimental_supported_tools
+                .iter()
+                // Existing model catalogs still advertise the previous name.
+                .any(|tool| {
+                    matches!(
+                        tool.as_str(),
+                        "request_user_input_async" | "send_user_message_async"
+                    )
+                }))
     {
         let model_messages = ResolvedModelMessages::from_model(context.model_info);
         registry.add_with_exposure(
             RequestUserInputAsyncHandler {
-                description: model_messages
-                    .request_user_input_async_description()
-                    .to_string(),
-                parameters: model_messages
-                    .request_user_input_async_parameters_override()
-                    .map(str::to_owned),
+                description: if cfg!(feature = "brr-runtime") {
+                    "Ask the user one to three concise questions that can be answered asynchronously. Include suggested options when useful; the user can always enter a custom text answer.".to_string()
+                } else {
+                    model_messages
+                        .request_user_input_async_description()
+                        .to_string()
+                },
+                parameters: if cfg!(feature = "brr-runtime") {
+                    None
+                } else {
+                    model_messages
+                        .request_user_input_async_parameters_override()
+                        .map(str::to_owned)
+                },
             },
             ToolExposure::DirectModelOnly,
         );
@@ -1604,6 +1625,10 @@ fn append_dynamic_tool_runtimes(dynamic_tools: &[DynamicToolSpec], registry: &mu
     for spec in dynamic_tools {
         match spec {
             DynamicToolSpec::Function(tool) => {
+                if cfg!(feature = "brr-runtime") && tool.name == BRR_UI_RENDER_TOOL_NAME {
+                    tracing::warn!("ignoring dynamic tool using reserved Brr tool name");
+                    continue;
+                }
                 let Some(handler) = DynamicToolHandler::new(tool) else {
                     tracing::error!(
                         "Failed to convert dynamic tool {:?} to OpenAI tool",
@@ -1616,6 +1641,10 @@ fn append_dynamic_tool_runtimes(dynamic_tools: &[DynamicToolSpec], registry: &mu
             DynamicToolSpec::Namespace(namespace) => {
                 for tool in &namespace.tools {
                     let DynamicToolNamespaceTool::Function(tool) = tool;
+                    if cfg!(feature = "brr-runtime") && tool.name == BRR_UI_RENDER_TOOL_NAME {
+                        tracing::warn!("ignoring dynamic tool using reserved Brr tool name");
+                        continue;
+                    }
                     let Some(handler) = DynamicToolHandler::new_in_namespace(namespace, tool)
                     else {
                         tracing::error!(
@@ -1629,6 +1658,59 @@ fn append_dynamic_tool_runtimes(dynamic_tools: &[DynamicToolSpec], registry: &mu
                 }
             }
         }
+    }
+}
+
+fn append_brr_ui_renderer(turn_context: &TurnContext, registry: &mut ToolRegistry) {
+    if !cfg!(feature = "brr-runtime")
+        || !turn_context.config.brr_ui_enabled
+        || turn_context.session_source.is_non_root_agent()
+    {
+        return;
+    }
+
+    if registry
+        .entries()
+        .any(|entry| entry.runtime.tool_name().name == BRR_UI_RENDER_TOOL_NAME)
+    {
+        tracing::warn!(
+            "not registering Brr UI renderer because its reserved name is already in use"
+        );
+        return;
+    }
+
+    let tool = DynamicToolFunctionSpec {
+        name: BRR_UI_RENDER_TOOL_NAME.to_string(),
+        description: "Render an accessible Brr UI document when a structured presentation materially improves the answer. Prefer plain text when prose, a short list, or a small table is enough. `kind: native` components: text `{text}`; group `{children}`; comparison `{columns:[{label,text}]}`; table `{columns:string[],rows:cell[][]}`; timeline `{entries:[{label,text}]}`; chart `{chartType:bar|line,points:[{label,value:number}]}`; diagram `{nodes:[{id,label,x,y}],edges:[{from,to}]}`; tabs `{tabs:[{id,label,children}]}`; select `{label,stateKey,options:[{label,value:string}]}`; slider `{label,stateKey,min,max,step?}`; input `{label,stateKey,inputType?:text|number}`; form `{label,children,actionId?}`; button `{label,actionId}`. Every component needs a unique id and type; any component may use `visibleWhen:{key,equals:scalar}`. Bound controls need matching values in `initialState`; text interpolation supports only `{{key}}` scalar lookup. Actions are `{id,label,prompt}`. Use kind app only for interactions or computation native controls cannot express; supply complete self-contained HTML using only `window.brrUI.getState()`, `setState(jsonObject)`, `requestAction(actionId)`, and `resize(height)`, with no external resources. Always include version 1, kind, nonempty title and accessible fallback text, initialState, actions, and the fields required by the selected kind. Example native: {\"version\":1,\"kind\":\"native\",\"title\":\"Options\",\"text\":\"Compare A and B\",\"initialState\":{},\"actions\":[],\"components\":[{\"id\":\"compare\",\"type\":\"comparison\",\"columns\":[{\"label\":\"A\",\"text\":\"Fast\"},{\"label\":\"B\",\"text\":\"Flexible\"}]}]}. Example app: {\"version\":1,\"kind\":\"app\",\"title\":\"Counter\",\"text\":\"A counter\",\"initialState\":{\"count\":0},\"actions\":[],\"html\":\"<button id='count'>0</button><script>const b=document.getElementById('count'); b.onclick=()=>{const s=window.brrUI.getState(); s.count++; window.brrUI.setState(s); b.textContent=s.count}</script>\"}. Keep the accessible text complete because it is shown when validation fails or rendering is unavailable.".to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "version": {"type": "integer", "enum": [1]},
+                "kind": {"type": "string", "enum": ["native", "app"]},
+                "title": {"type": "string", "minLength": 1},
+                "text": {"type": "string", "minLength": 1, "description": "Complete accessible fallback text shown if validation or rendering fails."},
+                "initialState": {"type": "object"},
+                "actions": {"type": "array", "maxItems": 64, "items": {"type": "object", "properties": {"id": {"type": "string"}, "label": {"type": "string"}, "prompt": {"type": "string"}}, "required": ["id", "label", "prompt"], "additionalProperties": false}},
+                "components": {"type": "array", "maxItems": 256, "description": "Required for native documents. Components use unique id/type, optional visibleWhen {key,equals}, and the exact type-specific fields described in the tool instructions.", "items": {"type": "object", "properties": {"id": {"type": "string"}, "type": {"type": "string"}}, "required": ["id", "type"], "additionalProperties": true}},
+                "html": {"type": "string", "description": "Required for app documents. Complete self-contained app HTML."}
+            },
+            "required": ["version", "kind", "title", "text", "initialState", "actions"],
+            "allOf": [
+                {
+                    "if": {"properties": {"kind": {"const": "native"}}},
+                    "then": {"required": ["components"]}
+                },
+                {
+                    "if": {"properties": {"kind": {"const": "app"}}},
+                    "then": {"required": ["html"], "properties": {"html": {"minLength": 1}}}
+                }
+            ],
+            "additionalProperties": false
+        }),
+        defer_loading: false,
+    };
+    if let Some(handler) = DynamicToolHandler::new(&tool) {
+        registry.register_external(Arc::new(handler));
     }
 }
 

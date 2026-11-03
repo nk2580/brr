@@ -4,7 +4,7 @@ test('Extensions panel installs plugins and preserves MCP configuration, OAuth, 
   await page.addInitScript(() => {
     localStorage.setItem('brr.appearance.sidebarColor', 'lime')
     const thread = {
-      id: 'extensions-thread', preview: 'Review the extension setup', cwd: '/workspace/extensions', updatedAt: 1,
+      id: 'extensions-thread', projectId: null, preview: 'Review the extension setup', cwd: '/workspace/extensions', workspace: {cwd: '/workspace/extensions', roots: ['/workspace/extensions'], folders: [{source: '/workspace/extensions', path: '/workspace/extensions'}], worktrees: [], scopeProjectId: null, projectRevision: null}, updatedAt: 1,
       turns: [{ id: 'turn-1', status: 'completed', items: [
         { id: 'user-1', type: 'userMessage', content: [{ type: 'text', text: 'Set up the extension.' }] },
         { id: 'assistant-1', type: 'agentMessage', text: 'Ready to review the extension setup.' },
@@ -31,6 +31,22 @@ test('Extensions panel installs plugins and preserves MCP configuration, OAuth, 
         if (command === 'open_external_url') {
           requests.push({ command, args })
           return null
+        }
+        if (command === 'list_projects') return { data: [] }
+        if (command === 'create_project') return { id: 'project-extension', revision: 1, ...args.project, hidden: false }
+        if (command === 'save_project') return { ...args.project, revision: (args.project.revision ?? 1) + 1, hidden: false }
+        if (command === 'delete_project' || command === 'move_chat_to_project') return null
+        if (command === 'agents_request' && args.method === 'questions.list') return { data: [] }
+        if (command === 'chat_request') {
+          const {method, params = {}} = args
+          ;((window as any).__chatRequests ??= []).push({method, params})
+          if (method === 'drafts.list' || method === 'attachments.list') return []
+          if (method === 'drafts.get') throw new Error('No saved fixture draft')
+          if (method === 'drafts.save') return {...params, id: params.id, threadId: params.threadId ?? null, projectId: params.projectId ?? null, agentId: params.agentId ?? null, revision: (params.expectedRevision ?? 0) + 1, updatedAt: '2026-11-02T00:00:00Z'}
+          if (method === 'drafts.promote') return {id: params.id, threadId: params.threadId, projectId: params.projectId ?? null, agentId: params.agentId ?? null, document: params.document ?? {text: '', references: [], quotes: []}, settings: params.settings ?? {model: '', effort: 'medium', mode: 'default'}, revision: 1, updatedAt: '2026-11-02T00:00:00Z'}
+          if (method === 'foreground.submit') return {turn: {id: 'fixture-turn'}, turnId: 'fixture-turn', submission: {id: 'fixture-submission', threadId: params.threadId, status: 'accepted', revision: 1}, queued: false}
+          if (method === 'queue.list') return {entries: [], state: {paused: false}}
+          return {}
         }
         if (command !== 'engine_request') throw new Error(`Unexpected command ${command}`)
         const { method, params } = args
@@ -127,7 +143,7 @@ test('Extensions panel installs plugins and preserves MCP configuration, OAuth, 
   await page.screenshot({ path: 'projects/desktop-agent/evidence/extensions-minimum.png', fullPage: true })
   await page.getByRole('button', { name: 'Use prompt as message' }).click()
   await expect(page.getByRole('complementary', { name: 'Plugins and MCP connections' })).toHaveCount(0)
-  await expect(page.getByRole('textbox', { name: 'Message' })).toHaveValue('Keep this draft\n\nuser: Summarize today’s calendar.')
+  await expect(page.getByRole('textbox', { name: 'Message' })).toHaveText('Keep this draft\n\nuser: Summarize today’s calendar.')
   const promptRequest = await page.evaluate(() => (window as any).__extensionsRequests.find((request: any) => request.method === 'mcpServer/prompt/get'))
   expect(promptRequest.params).toEqual({ server: 'qa-server', name: 'daily-brief', threadId: 'extensions-thread' })
 })

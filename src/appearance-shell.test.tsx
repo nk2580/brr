@@ -4,6 +4,16 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import App from './App'
 import { SIDEBAR_COLORS } from './lib/appearance'
 
+// Shell behavior uses a controlled editor; Lexical input is covered by its own
+// component tests and the browser suite, where native selection APIs are present.
+vi.mock('./components/ChatEditor', async () => {
+  const React = await import('react')
+  return { ChatEditor: React.forwardRef<any, any>((props, ref) => {
+    React.useImperativeHandle(ref, () => ({focus: () => {}, insertText: () => {}, insertQuote: () => {}, openMenu: () => {}}))
+    return <textarea aria-label="Message" value={props.document.text} onChange={event => props.onChange({...props.document, text: event.target.value})} />
+  }) }
+})
+
 vi.mock('./lib/client', () => ({ isDesktop: () => false, client: {} }))
 
 beforeEach(() => localStorage.clear())

@@ -23,3 +23,15 @@ Brr's MCP Apps host uses the official @modelcontextprotocol/ext-apps SDK (MIT)
 and Model Context Protocol client/core libraries (Apache-2.0).
 Their licenses and transitive dependency notices are retained in
 src-tauri/licenses/mcp-apps-THIRD-PARTY-NOTICES.txt and included in desktop bundles.
+
+Brr's desktop interface uses the Archivo variable font, Copyright 2020 The
+Archivo Project Authors, under the SIL Open Font License 1.1. The font and its
+full license are retained in public/assets/fonts and included in the app assets.
+
+Brr workspace terminals use xterm.js and its Fit addon (MIT), and portable-pty
+(MIT). Their upstream licenses are retained in src-tauri/licenses and included
+in desktop bundles.
+
+Brr’s semantic chat editor uses Lexical and @lexical packages (MIT), Copyright
+Meta Platforms, Inc. and affiliates. Their upstream license is retained at
+src-tauri/licenses/lexical-LICENSE.txt and included in desktop bundles.

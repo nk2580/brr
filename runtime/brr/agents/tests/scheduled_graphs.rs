@@ -32,6 +32,7 @@ fn task(agent_id: &str, title: &str, dependencies: Vec<String>) -> TaskInput {
         project_id: Some("project-x".into()),
         model: Some("gpt-5".into()),
         effort: Some("medium".into()),
+        workspace_permission: None,
         dependencies,
     }
 }

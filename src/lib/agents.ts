@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
-import type { Thread } from './client'
+import type { Thread, ProjectRecord } from './client'
+import type { QuestionAnswers, QuestionRequest } from './questions'
 
 const request = <T = unknown>(method: string, params: Record<string, unknown> = {}) =>
   invoke<T>('agents_request', { method, params })
@@ -22,7 +23,8 @@ export type AgentEvent = { seq: number; kind: string; entityId: string; payload:
 export type AgentSettings = { maxBackground: number; maxPerAgent: number }
 export type Page<T> = { data: T[]; nextCursor: string | null; sources?: MemorySource[] }
 export type RuntimeRequest = { id: string | number; method: string; params: Record<string, unknown> }
-export type WorkspaceSetupCommand = { phase: string; name?: string | null; template: string; approved: boolean }
+export type WorkspaceSetupCommand = { cwd?: string; phase: string; name?: string | null; template: string; approved: boolean }
+export type { Question, QuestionAnswers, QuestionRequest } from './questions'
 
 export const agents = {
   list: () => request<{ data: AgentProfile[] }>('agents.list'),
@@ -33,7 +35,7 @@ export const agents = {
   approve: (draftId: string, hash: string) => request<{ agent: AgentProfile }>('agents.approve', { draftId, hash }),
   reject: (draftId: string, hash: string) => request('agents.reject', { draftId, hash }),
   sessions: (agentId: string) => request<{ data: Thread[] }>('agents.sessions', { agentId }),
-  open: (agentId: string, options: { model?: string; effort?: string; cwd?: string; readOnly?: boolean } = {}) => request<{ thread: Thread }>('agents.open', { agentId, ...options }),
+  open: (agentId: string, options: { model?: string; effort?: string; cwd?: string; projectId?: string | null; readOnly?: boolean } = {}) => request<{ thread: Thread }>('agents.open', { agentId, ...options }),
   inspectWorkspace: async (cwd: string) => ({ cwd, ...await request<{ git: boolean; commands: WorkspaceSetupCommand[] }>('agents.workspace.inspect', { cwd }) }),
   memory: (agentId?: string, projectId?: string) => request<Page<MemoryRecord>>('memory.list', { ...(agentId ? { agentId } : {}), ...(projectId ? { projectId } : {}) }),
   searchMemory: (query: string, agentId?: string, projectId?: string) => request<Page<MemoryRecord>>('memory.search', { query, ...(agentId ? { agentId } : {}), ...(projectId ? { projectId } : {}) }),
@@ -49,11 +51,17 @@ export const agents = {
   approveProposal: (proposalId: string, hash: string) => request<{ data: Task[] }>('tasks.approve', { proposalId, hash }),
   scheduleProposal: (proposalId: string, hash: string, schedule: { name: string; expression: string; timezone: string }) => request<Workflow>('tasks.schedule', { proposalId, hash, ...schedule }),
   workflows: (agentId?: string) => request<{ data: Workflow[] }>('workflows.list', agentId ? { agentId } : {}),
-  createWorkflow: (input: { name: string; agentId: string; title: string; instructions: string; acceptanceCriteria: string[]; cwd?: string; model?: string; effort?: string; expression: string; timezone: string }) => request<Workflow>('workflows.create', input),
+  createWorkflow: (input: { name: string; agentId: string; title: string; instructions: string; acceptanceCriteria: string[]; cwd?: string; projectId?: string; model?: string; effort?: string; expression: string; timezone: string }) => request<Workflow>('workflows.create', input),
   controlWorkflow: (workflowId: string, paused: boolean) => request<Workflow>('workflows.control', { workflowId, paused }),
   settings: () => request<AgentSettings>('agents.settings'),
   updateSettings: (settings: AgentSettings) => request<AgentSettings>('agents.settings.update', settings),
   events: (after?: number, limit?: number) => request<{ data: AgentEvent[] }>('agents.events', { ...(after === undefined ? {} : { after }), ...(limit === undefined ? {} : { limit }) }),
-  decisions: () => request<{ data: DelegationProposal[]; runtimeRequests?: RuntimeRequest[]; drafts?: ProfileDraft[] }>('agents.decisions'),
-  projects: () => request<{ data: string[] }>('memory.projects'),
+  decisions: () => request<{ data: DelegationProposal[]; runtimeRequests?: RuntimeRequest[]; drafts?: ProfileDraft[]; questions?: QuestionRequest[] }>('agents.decisions'),
+  questions: {
+    list: (options: { threadId?: string; pendingOnly?: boolean } = {}) => request<{ data: QuestionRequest[] }>('questions.list', options),
+    saveDraft: (requestId: string, answers: QuestionAnswers) => request<QuestionRequest>('questions.saveDraft', { requestId, answers }),
+    answer: (requestId: string, answers: QuestionAnswers) => request<QuestionRequest>('questions.answer', { requestId, answers }),
+    dismiss: (requestId: string) => request<QuestionRequest>('questions.dismiss', { requestId }),
+  },
+  projects: () => request<{ data: ProjectRecord[] }>('memory.projects'),
 }

@@ -16,6 +16,21 @@ pub(super) async fn prepare(
     store: &LocalThreadStore,
     params: PrepareForkParams,
 ) -> ThreadStoreResult<PreparedFork> {
+    prepare_with_copy(store, params, false).await
+}
+
+pub(super) async fn prepare_for_copy(
+    store: &LocalThreadStore,
+    params: PrepareForkParams,
+) -> ThreadStoreResult<PreparedFork> {
+    prepare_with_copy(store, params, true).await
+}
+
+async fn prepare_with_copy(
+    store: &LocalThreadStore,
+    params: PrepareForkParams,
+    include_copied_history: bool,
+) -> ThreadStoreResult<PreparedFork> {
     let PrepareForkParams {
         thread_id,
         boundary,
@@ -74,14 +89,28 @@ pub(super) async fn prepare(
 
     let history_base = history_base_at_boundary(store, thread_id, boundary, &lineage).await?;
     drop(source_writer_guard);
-    let model_context = Arc::new(model_context::load_for_fork(lineage, history_base).await?);
-
-    Ok(PreparedFork::new(
-        thread_id,
-        history_base,
-        model_context,
-        source_reservation,
-    ))
+    let model_context =
+        Arc::new(model_context::load_for_fork(lineage.clone(), history_base).await?);
+    let prepared = PreparedFork::new(thread_id, history_base, model_context, source_reservation);
+    if include_copied_history {
+        let canonical_session_meta = prepared
+            .model_context
+            .first()
+            .filter(|item| matches!(item, codex_rollout::RolloutItem::SessionMeta(_)))
+            .cloned()
+            .ok_or_else(|| ThreadStoreError::Internal {
+                message: "fork model context is missing canonical session metadata".to_string(),
+            })?;
+        let copied_history = model_context::load_full_history_for_fork(
+            lineage,
+            history_base,
+            canonical_session_meta,
+        )
+        .await?;
+        Ok(prepared.with_copied_history(copied_history))
+    } else {
+        Ok(prepared)
+    }
 }
 
 pub(super) async fn history_base_at_boundary(

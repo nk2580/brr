@@ -4,8 +4,19 @@ import { describe, expect, it, vi } from 'vitest';
 import { AgentMessage } from './AgentMessage';
 
 vi.mock('./McpApp', () => ({ McpApp: ({ invocation }: any) => <div data-testid="mcp-app">{invocation.resourceUri}</div> }));
+vi.mock('./IntelligentUi', () => ({ IntelligentUi: ({identity, preview, document}: any) => <div data-testid="intelligent-ui" data-preview={Boolean(preview)}>{identity.callId}{document?.title}</div> }));
 
 describe('AgentMessage', () => {
+  it('renders successful generated UI calls and keeps failed app source as text', () => {
+    const document = {version: 1, kind: 'app', title: 'Calculator', text: 'Calculator alternative', initialState: {}, actions: [], html: '<script>bad()</script>'};
+    const {rerender} = render(<AgentMessage item={{id: 'ui-1', type: 'dynamicToolCall', tool: 'brr_ui_render', status: 'completed', success: true, arguments: document}} threadId="chat" />);
+    expect(screen.getByTestId('intelligent-ui')).toHaveTextContent('ui-1');
+    rerender(<AgentMessage item={{id: 'ui-1', type: 'dynamicToolCall', tool: 'brr_ui_render', status: 'failed', success: false, arguments: document}} threadId="chat" />);
+    expect(screen.queryByTestId('intelligent-ui')).not.toBeInTheDocument();
+    expect(screen.getByText('Calculator alternative')).toBeInTheDocument();
+    expect(window.document.querySelector('script')).toBeNull();
+  });
+
   it('labels a runtime plan item as a proposed plan', () => {
     render(<AgentMessage item={{ id: 'plan-1', type: 'plan', text: '1. Inspect the current flow' }} />);
 
@@ -60,4 +71,13 @@ describe('AgentMessage', () => {
     rerender(<AgentMessage item={{ id: 'tool-1', type: 'mcpToolCall', server: 'calendar', tool: 'today', mcpAppUi: { resourceUri: 'ui://calendar/today' } }} />);
     expect(screen.queryByTestId('mcp-app')).not.toBeInTheDocument();
   });
+});
+
+
+it('copies a code block as plain text without its fence or surrounding answer', async () => {
+  const writeText = vi.fn().mockResolvedValue(undefined);
+  Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
+  render(<AgentMessage item={{ id: 'code-answer', type: 'agentMessage', text: 'Example:\n\n```ts\nconst value = 42;\n```' }} />);
+  await userEvent.click(screen.getByRole('button', { name: 'Copy code' }));
+  expect(writeText).toHaveBeenCalledWith('const value = 42;\n');
 });

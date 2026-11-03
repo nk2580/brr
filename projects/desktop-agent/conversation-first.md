@@ -1,0 +1,47 @@
+# Make Brr feel conversation-first
+
+Status: implemented in the working tree. Automated and packaged macOS checks are recorded below. No commit, push, installation or replacement of the regular Brr app has been performed.
+
+The accepted contract is [ADR 009](../../docs/adr/009-conversation-first-chat.md). This implements the approved five-stage plan while retaining Archivo, Brr's shared theme and rail, compact composer controls, navigation and named Agents. The interaction reference is [DeepSeek Harness at ce7073d](https://github.com/deepseek-ai/deepseek-harness/commit/ce7073d51254c26cd63b22a60835b8f948deb447); no Harness source or complete package was copied.
+
+## Delivered behavior
+
+1. **Drafts and editor:** a growing Lexical plain-text editor, semantic reference and quote chips, undo/redo, selection restoration, plain-text clipboard output and independent SQLite drafts/settings. Unsent new chats have Draft sidebar rows. Promotion, asynchronous imports, failed delivery and pending-question takeover preserve the originating draft.
+2. **Context controls:** keyboard-operated Agent and Files/Folders menus, Plan and enabled-skill commands, Add context, native file selection, external drop and image paste. Ordered attachment cards support removal, preparation errors and retry. Images and UTF-8 text have previews. File chips open the same host-resolved file used by the conversation. Agent assignment sends only the selected message and context into the existing task/workspace pipeline.
+3. **Queue and steering:** running Enter queues, Cmd/Ctrl+Enter steers, and visible actions expose both choices beside Stop. Queued messages retain their settings and selected attachment IDs; Edit, Remove, Steer now and pause/resume operate through the host coordinator. Durable submission IDs reconcile authoritative history, protect uncertain delivery and prevent duplicate learning evidence.
+4. **Transcript and navigation:** turn-aware work summaries, persistent disclosure, Copy/Quote/Reuse, code-block Copy, Jump to latest and compact turn navigation. Semantic scroll restoration respects the reader's position during streaming, disclosure, resizing and chat changes. Interactive responses and MCP Apps retain stable identities.
+5. **Editing and branching:** edit-before-turn and branch-after-completed-turn, with source history preserved. Git snapshots contain current working files and are materialized before destination setup hooks. Non-Git folders have a visible shared-folder label; folderless branches get private scratch space. Branch journals fence incomplete destinations and support explicit recovery without blindly retrying runtime forks. Agent identity, historical execution scope and attachment grants survive recovery; original queues remain in place.
+
+## Verification
+
+The machine-readable record, logs, source hashes and screenshots are in [verification.json](evidence/conversation-first/verification.json). Automated checks cover independent drafts/settings, keyboard and IME guards, queue ordering and races, attachment ownership and staged originals, task context isolation, semantic reference validation, completed-turn navigation, scroll anchors, dirty Git snapshots, hook ordering and recoverable forks. Existing questions, approvals, Plan gates, workspace tools, interactive responses and Agents are included in the combined regression suites.
+
+The combined frontend suite passes 462 tests; the native library suite passes 195 with 7 optional/live checks ignored. The serial browser suite passes 36 scenarios with one optional Rust sandbox fixture skipped; all three chat scenarios also pass against the final archive closure at both target sizes. The production frontend and owned runtime build successfully. A standalone harness compiles the actual runtime permission helper and Seatbelt generator: both helper tests and the macOS process-level read/deny/write check pass. It does not substitute for packaged WebKit interaction or authenticated delivery checks.
+
+The targeted owned-runtime copied-history regression also passes: both completed turns and their user content survive compaction, physical copying and a cold restart; the fork appears in the normal history list and makes no model inference request. Cargo builds the test binary with the Brr feature, then the standalone shell executes that exact binary. Cargo-launched execution and the synchronous Node launcher timed out at initialization on this machine; the launcher cause remains unverified and those failures are retained separately. The full owned-runtime integration suite was not run.
+
+Behavioral failures were observed before the corresponding changes, including missing code-block Copy, file-chip keyboard activation, UTF-16 range validation, turn identity, finished-turn status and unknown runtime state adoption. Bounded Luna implementation and iterative Sol review were used. The final review's task-operation collision and deleted-project recovery fixes have focused passing regressions; their negative-control check is recorded separately from the earlier test-first work. The evidence distinguishes observed failures from added passing coverage.
+
+Browser checks use isolated native API fixtures. They include desktop and 800×600 layouts, real Lexical keyboard handling, draft reloads, attachment preview, queue controls, transcript navigation and stable scroll behavior. Browser fixtures do not establish native dialog behavior, OS sandbox enforcement or authenticated provider inference.
+
+A separate unsigned debug QA application, `src-tauri/target/debug/bundle/macos/Brr Chat QA.app` (`dev.brr.chatqa`), was built and inspected at 800×600 without replacing the installed app. The user unlocked the Mac and completed normal ChatGPT sign-in. No credentials were copied into fixtures. The packaged owned runtime and code-mode helper pass clean-profile smoke checks; authenticated synthetic chats additionally verified:
+
+- Independent drafts, selection, model/reasoning/Plan settings and attachments across cold restart; edited and blank edit-before-first-turn branches remain reachable. Archived branches remain archived after restart.
+- Native text/image selection and preview, image clipboard paste/removal, slash-menu insertion, multiline input, Plan shortcut and undo.
+- Original attachment text and image inspection, exact saved-worktree references, and inherited branch originals read through a new branch-specific read-only path. Folderless branches received fresh private scratch space.
+- Enter queueing, queue editing/removal, restart-paused dispatch, explicit ordered resumption, same-turn Cmd+Enter steering, Stop, and work disclosure during streaming.
+- Correct stopped/completed status, Copy/Quote/Reuse preparation, and blank destination drafts without source-draft leakage.
+- Dirty Git current-file snapshots, exact 0751 modes, deletion/untracked preservation, unchanged source index and original project files. The selected completed history restored after cold restart from a self-contained rollout.
+- Saved-message recovery without inference: healthy readable forks are excluded, definitely failed text restores into an unsent draft with valid references, queued cancellation prevents delivery, and accepted/uncertain records remain protected.
+
+Native inspection exposed real startup, context naming, WebKit disclosure, terminal-state, draft ownership, branch persistence and file-mode defects. Their regressions and fixes are retained in the evidence, including the earlier failed screenshots. A failed pre-fix synthetic branch remains fenced with its retained workspace; explicit recovery reports its missing runtime chat rather than recreating or starting it. Successful final branches use the corrected path.
+
+Final Sol review found no remaining actionable source findings in the reviewed closure. The final archive regressions cover failed and stale list refreshes, navigation during archive, and typing under a fresh draft identity while the original durable row remains unchanged. Two ticket fixture races encountered during combined verification were corrected in tests only; ticket product behavior was not changed for this work.
+
+Other platforms are unverified. Linux's Bubblewrap adapter has a known mount-order limitation for reopening a read-only attachment subtree below a denied parent, so Linux attachment isolation is not claimed supported by this release. Built-in PDF/Office extraction remains outside scope; unsupported files retain their original form for available tools. Native external OS file drop was not manually exercised; the browser fixture covers drop handling. Signing, notarization and release distribution were not verified. Authenticated native results are recorded separately from signed-out runtime smokes.
+
+Runtime changes are recorded in [runtime/UPSTREAM.md](../../runtime/UPSTREAM.md), WorkTrunk changes in [vendor/WORKTRUNK.md](../../vendor/WORKTRUNK.md), and Lexical attribution in NOTICE and bundled license resources. Concurrent project, ticket, runtime and UI changes were preserved. Shared interfaces were coordinated with the other active Brr chats under explicit user authorization.
+
+## Composer layout follow-up
+
+The screenshot-reported extra attachment row and oversized composer were corrected in the [composer polish follow-up](composer-polish.md). That record contains the current UI source and QA bundle hashes; the original verification record above remains the earlier implementation checkpoint.

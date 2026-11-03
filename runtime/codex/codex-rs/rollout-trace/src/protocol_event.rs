@@ -414,6 +414,7 @@ pub(crate) fn tool_runtime_trace_event(event: &EventMsg) -> Option<ToolRuntimeTr
         | EventMsg::RequestUserInput(_)
         | EventMsg::DynamicToolCallRequest(_)
         | EventMsg::DynamicToolCallResponse(_)
+        | EventMsg::BrrUiArgumentsDelta(_)
         | EventMsg::ElicitationRequest(_)
         | EventMsg::ElicitationAbandoned(_)
         | EventMsg::NetworkApprovalResolved { .. }
@@ -496,6 +497,7 @@ pub(crate) fn wrapped_protocol_event_type(event: &EventMsg) -> Option<&'static s
         | EventMsg::RequestUserInput(_)
         | EventMsg::DynamicToolCallRequest(_)
         | EventMsg::DynamicToolCallResponse(_)
+        | EventMsg::BrrUiArgumentsDelta(_)
         | EventMsg::ElicitationRequest(_)
         | EventMsg::ElicitationAbandoned(_)
         | EventMsg::NetworkApprovalResolved { .. }

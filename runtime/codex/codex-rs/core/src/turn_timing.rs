@@ -502,6 +502,8 @@ fn response_event_records_turn_ttft(event: &ResponseEvent) -> bool {
         | ResponseEvent::ReasoningSummaryPartAdded { .. }
         | ResponseEvent::RateLimits(_)
         | ResponseEvent::ModelsEtag(_) => false,
+        #[cfg(feature = "brr-runtime")]
+        ResponseEvent::FunctionCallArgumentsDelta { .. } => false,
     }
 }
 

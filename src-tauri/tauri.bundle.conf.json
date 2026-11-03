@@ -15,7 +15,11 @@
       "../vendor/WORKTRUNK.md": "licenses/Brr-worktrunk-upstream.md",
       "licenses/cfworker-LICENSE.md": "licenses/cfworker-LICENSE.md",
       "licenses/cfworker-THIRD-PARTY-NOTICES.md": "licenses/cfworker-THIRD-PARTY-NOTICES.md",
-      "licenses/mcp-apps-THIRD-PARTY-NOTICES.txt": "licenses/mcp-apps-THIRD-PARTY-NOTICES.txt"
+      "licenses/mcp-apps-THIRD-PARTY-NOTICES.txt": "licenses/mcp-apps-THIRD-PARTY-NOTICES.txt",
+      "licenses/xterm-LICENSE.txt": "licenses/xterm-LICENSE.txt",
+      "licenses/xterm-addon-fit-LICENSE.txt": "licenses/xterm-addon-fit-LICENSE.txt",
+      "licenses/portable-pty-LICENSE.md": "licenses/portable-pty-LICENSE.md",
+      "licenses/lexical-LICENSE.txt": "licenses/lexical-LICENSE.txt"
     }
   }
 }

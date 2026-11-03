@@ -8,6 +8,48 @@ vi.mock('@tauri-apps/plugin-dialog', () => ({ open: vi.fn() }))
 
 import { client } from './client'
 
+describe('project file manager', () => {
+  beforeEach(() => invokeMock.mockReset())
+
+  it('reveals the original project folder and reports native errors', async () => {
+    invokeMock.mockResolvedValueOnce(undefined)
+    const path = '/Users/example/Project λ & notes'
+    await client.revealProject(path)
+    expect(invokeMock).toHaveBeenCalledWith('reveal_project_folder', {path})
+
+    invokeMock.mockRejectedValueOnce('Cannot access project folder')
+    await expect(client.revealProject(path)).rejects.toBe('Cannot access project folder')
+  })
+})
+
+describe('project management', () => {
+  beforeEach(() => invokeMock.mockReset())
+
+  it('creates folderless project buckets and moves chats without archiving them', async () => {
+    const input = {name: 'Research', folders: [], primaryFolder: null, model: null, effort: null, permission: null}
+    const project = {...input, id: 'project-research', revision: 1, hidden: false}
+    invokeMock.mockResolvedValueOnce(project).mockResolvedValueOnce(undefined).mockResolvedValueOnce(undefined)
+    expect(await client.createProject(input)).toEqual(project)
+    await client.moveChat('chat-1', project.id)
+    await client.deleteProject(project.id)
+    expect(invokeMock.mock.calls).toEqual([
+      ['create_project', {project: input}],
+      ['move_chat_to_project', {threadId: 'chat-1', projectId: project.id}],
+      ['delete_project', {projectId: project.id}],
+    ])
+  })
+
+  it('starts a folderless chat with explicit project membership and host-resolved folders', async () => {
+    invokeMock.mockResolvedValueOnce({commands: []}).mockResolvedValueOnce({thread: {id: 'chat-1', projectId: 'research'}})
+    await client.start('research', 'gpt-6.1-sol', true)
+    expect(invokeMock.mock.calls).toEqual([
+      ['engine_request', {method: 'brr/project/inspect', params: {projectId: 'research'}}],
+      ['engine_request', {method: 'thread/start', params: {projectId: 'research', model: 'gpt-6.1-sol', modelProvider: 'openai', approvalPolicy: 'on-request', sandbox: 'read-only'}}],
+    ])
+  })
+
+})
+
 describe('client thread resume', () => {
   beforeEach(() => invokeMock.mockReset())
 

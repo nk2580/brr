@@ -639,6 +639,13 @@ impl ThreadStore for LocalThreadStore {
         Box::pin(async move { paginated_fork::prepare(self, params).await })
     }
 
+    fn prepare_fork_for_copy(
+        &self,
+        params: PrepareForkParams,
+    ) -> ThreadStoreFuture<'_, PreparedFork> {
+        Box::pin(async move { paginated_fork::prepare_for_copy(self, params).await })
+    }
+
     fn revert_thread(&self, params: RevertThreadParams) -> ThreadStoreFuture<'_, ()> {
         Box::pin(async move { revert_thread::revert(self, params).await })
     }

@@ -28,6 +28,12 @@ pub(crate) struct RuntimeRpc {
 }
 
 impl RuntimeRpc {
+    pub(crate) async fn respond(&self, id: Value, result: Value) -> Result<(), String> {
+        if !self.alive.load(Ordering::SeqCst) {
+            return Err("The runtime disconnected before the answer was sent".into());
+        }
+        write_message(&self.stdin, &json!({"id":id,"result":result})).await
+    }
     pub async fn call(&self, method: &str, params: Value) -> Result<Value, String> {
         if !self.alive.load(Ordering::SeqCst) {
             return Err("Codex runtime disconnected. Reconnect to continue.".into());
@@ -42,7 +48,7 @@ impl RuntimeRpc {
         .await
         {
             self.pending.lock().unwrap().remove(&id);
-            return Err(error);
+            return Err(format!("Runtime transport error: {error}"));
         }
         let response = await_raw_response(method, rx, Duration::from_secs(60)).await;
         self.pending.lock().unwrap().remove(&id);
@@ -58,10 +64,23 @@ pub struct Engine {
     next_id: Arc<AtomicU64>,
     alive: Arc<AtomicBool>,
     worktrees: WorktreeManager,
-    agents: Arc<crate::agent_host::AgentHost>,
+    pub(crate) agents: Arc<crate::agent_host::AgentHost>,
+    pub(crate) ui_sandboxes: crate::generated_ui_sandbox::SandboxManager,
 }
 
+#[cfg(test)]
+#[path = "bridge_questions_tests.rs"]
+mod question_tests;
+
 impl Engine {
+    pub(crate) async fn archive_project_chats(
+        &self,
+        path: &str,
+    ) -> Result<crate::project_archive::ArchiveReport, String> {
+        crate::project_archive::archive_project_chats(&EngineArchiveBackend { engine: self }, path)
+            .await
+    }
+
     #[cfg(test)]
     pub(crate) async fn verify_live_agent_task(&self) -> Result<(), String> {
         self.agents.require_account().await?;
@@ -172,9 +191,22 @@ impl Engine {
         }
         Ok(())
     }
+    pub(crate) fn set_browser_handler(&self, handler: crate::workspace_bridge::BrowserToolHandler) {
+        self.agents.set_browser_handler(handler);
+    }
+
     pub async fn agents_request(&self, method: &str, params: Value) -> Result<Value, String> {
+        if method.starts_with("questions.") {
+            let result = self.agents.questions_request(method, params).await?;
+            if matches!(method, "questions.answer" | "questions.dismiss") {
+                self.agents
+                    .notify(json!({"method":"brr/questions/dispatch","params":{}}));
+            }
+            return Ok(result);
+        }
         let mut response = self.agents.request(method, params).await?;
         if method == "agents.decisions" {
+            response["questions"] = json!(self.agents.question_views(None, true).await?);
             response["runtimeRequests"] = json!(self
                 .approvals
                 .lock()
@@ -186,7 +218,41 @@ impl Engine {
         Ok(response)
     }
 
-    pub async fn connect(mut command: Command, events: EventSink) -> Result<Self, String> {
+    pub(crate) async fn intelligent_ui_request(
+        &self,
+        method: &str,
+        params: Value,
+    ) -> Result<Value, String> {
+        crate::intelligent_ui::request(self, method, params).await
+    }
+
+    pub(crate) async fn tickets_request(
+        &self,
+        method: &str,
+        params: Value,
+    ) -> Result<Value, String> {
+        crate::tickets::request(Some(&self.agents), method, params).await
+    }
+
+    pub async fn connect(command: Command, events: EventSink) -> Result<Self, String> {
+        let home = command
+            .as_std()
+            .get_current_dir()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                std::env::temp_dir().join(format!("brr-engine-{}", std::process::id()))
+            });
+        let store = brr_agent_core::AgentStore::open(home.join("agents")).await?;
+        let projects = crate::projects::ProjectStore::open(home.join("projects.sqlite")).await?;
+        Self::connect_with_stores(command, events, store, projects).await
+    }
+
+    pub async fn connect_with_stores(
+        mut command: Command,
+        events: EventSink,
+        store: brr_agent_core::AgentStore,
+        projects: crate::projects::ProjectStore,
+    ) -> Result<Self, String> {
         let home = command
             .as_std()
             .get_current_dir()
@@ -221,6 +287,8 @@ impl Engine {
             rpc,
             worktrees.clone(),
             events.clone(),
+            store,
+            projects,
         )
         .await?;
         let agents_reader = agents.clone();
@@ -237,6 +305,20 @@ impl Engine {
                     continue;
                 };
                 if message.get("method").is_some() {
+                    if let Err(error) = agents_reader.capture_question(&message).await {
+                        (events)(
+                            json!({"method":"brr/questions/error","params":{"message":error}}),
+                        );
+                        if message["method"] == "item/tool/requestUserInput" {
+                            let _ = write_message(&stdin_reader, &json!({"id":message["id"],"error":{"code":-32602,"message":error}})).await;
+                            continue;
+                        }
+                    }
+                    if let Err(error) = agents_reader.observe_question_response(&message).await {
+                        (events)(
+                            json!({"method":"brr/questions/error","params":{"message":error}}),
+                        );
+                    }
                     if let Some(id) = message.get("id") {
                         let method = message["method"].as_str().unwrap_or("");
                         if method == "item/tool/call" {
@@ -266,7 +348,6 @@ impl Engine {
                             "item/commandExecution/requestApproval"
                                 | "item/fileChange/requestApproval"
                                 | "item/permissions/requestApproval"
-                                | "item/tool/requestUserInput"
                                 | "mcpServer/elicitation/request"
                         ) {
                             let _ = agents_reader.before_approval(&message).await;
@@ -274,7 +355,7 @@ impl Engine {
                                 .lock()
                                 .unwrap()
                                 .insert(id.to_string(), message.clone());
-                        } else {
+                        } else if method != "item/tool/requestUserInput" {
                             let reply = json!({"id":id,"error":{"code":-32601,"message":"This client does not support this request"}});
                             let _ = write_message(&stdin_reader, &reply).await;
                             continue;
@@ -286,6 +367,7 @@ impl Engine {
                             .unwrap()
                             .remove(&message["params"]["requestId"].to_string());
                     }
+                    agents_reader.capture_chat_event(&message).await;
                     agents_reader.notify(message.clone());
                     (events)(message);
                 } else if let Some(id) = message["id"].as_u64() {
@@ -303,6 +385,9 @@ impl Engine {
                     }
                 }
             }
+            agents_reader
+                .pause_pending_chats("The runtime disconnected")
+                .await;
             alive_reader.store(false, Ordering::SeqCst);
             for (_, sender) in pending_reader.lock().unwrap().drain() {
                 let _ = sender.send(Err(
@@ -321,6 +406,7 @@ impl Engine {
             alive,
             worktrees,
             agents,
+            ui_sandboxes: crate::generated_ui_sandbox::SandboxManager::default(),
         };
         engine.raw("initialize", json!({"clientInfo":{"name":"brr_desktop","title":"Brr","version":"0.1.0"},"capabilities":{"experimentalApi":true,"requestAttestation":false,"extensions":{"io.modelcontextprotocol/ui":{"mimeTypes":["text/html;profile=mcp-app"]},"openai/form":{},"openai/standard-form-input":{},"openai/elicitation":{"form":{}}}}})).await?;
         write_message(&engine.stdin, &json!({"method":"initialized"})).await?;
@@ -354,13 +440,86 @@ impl Engine {
     }
 
     pub async fn request(&self, method: &str, mut params: Value) -> Result<Value, String> {
+        if method == "turn/interrupt" || method == "thread/archive" {
+            if let Some(thread) = params["threadId"].as_str() {
+                self.agents
+                    .pause_chat(thread, "Stopped or archived by the user")
+                    .await;
+            }
+        }
+
         policy::validate_request(method, &params)?;
+        // Foreground paths share one durable outbox and per-thread question lock.
+        // Host-owned task/interview workers call their workflow RPC directly.
+        if matches!(method, "turn/start" | "turn/steer") {
+            let interview = match params["threadId"].as_str() {
+                Some(id) => self
+                    .agents
+                    .store
+                    .session_binding(id)
+                    .await
+                    .ok()
+                    .is_some_and(|binding| {
+                        matches!(binding.kind.as_str(), "interview" | "profile")
+                    }),
+                None => false,
+            };
+            if !interview {
+                return self.agents.legacy_chat_submit(method, params).await;
+            }
+        }
+        let _question_dispatch = if matches!(
+            method,
+            "turn/start" | "turn/steer" | "turn/interrupt" | "thread/archive" | "thread/resume"
+        ) {
+            match params["threadId"].as_str() {
+                Some(id) => Some(self.agents.questions.thread_guard(id).await),
+                None => None,
+            }
+        } else {
+            None
+        };
+        if matches!(method, "turn/interrupt" | "thread/archive") {
+            if let Some(thread_id) = params["threadId"].as_str() {
+                if let Ok(binding) = self.agents.store.session_binding(thread_id).await {
+                    if binding.kind == "learning" {
+                        return Err(
+                            "Learning sessions are owned by the background scheduler".into()
+                        );
+                    }
+                    if binding.kind == "task" {
+                        let run = self
+                            .agents
+                            .store
+                            .get_run(
+                                binding
+                                    .task_run_id
+                                    .as_deref()
+                                    .ok_or("Task history has no run binding")?,
+                            )
+                            .await?;
+                        self.agents
+                            .control_task_with_run(
+                                &run.task_id,
+                                brr_agent_core::TaskAction::Cancel,
+                                Some(&run.id),
+                            )
+                            .await?;
+                        self.agents.changed();
+                        if method == "turn/interrupt" {
+                            return Ok(json!({}));
+                        }
+                    }
+                }
+            }
+        }
         if matches!(
             method,
             "thread/start"
                 | "thread/resume"
                 | "turn/start"
                 | "turn/steer"
+                | "brr/project/inspect"
                 | "brr/worktree/inspect"
                 | "brr/worktree/approve"
         ) {
@@ -370,6 +529,14 @@ impl Engine {
             if !policy::is_chatgpt_account(&account) {
                 return Err("Sign in with ChatGPT to start a coding session.".into());
             }
+        }
+        if method == "brr/project/inspect" {
+            let project = self
+                .agents
+                .project_for_start(params["projectId"].as_str(), None)
+                .await?;
+            let commands = self.worktrees.inspect_session(project.as_ref()).await?;
+            return Ok(json!({"commands": commands}));
         }
         if method == "brr/worktree/inspect" {
             let commands = self
@@ -397,20 +564,28 @@ impl Engine {
                 params["sandbox"] = json!("workspace-write")
             }
         }
+        let requested_project_id = params["projectId"].as_str().map(str::to_owned);
         let workspace = if method == "thread/start" {
-            let cwd = params["cwd"]
-                .as_str()
-                .ok_or("Choose a project folder before starting a session")?;
-            let workspace = self.worktrees.prepare(cwd).await?;
+            let project = self
+                .agents
+                .project_for_start(requested_project_id.as_deref(), params["cwd"].as_str())
+                .await?;
+            let mut workspace = self.worktrees.prepare_session(project.as_ref()).await?;
+            if requested_project_id.is_none() {
+                workspace.scope_project_id = None;
+                workspace.project_revision = None;
+            }
             params["cwd"] = json!(workspace.cwd);
+            params["runtimeWorkspaceRoots"] = json!(workspace.roots);
             Some(workspace)
         } else if matches!(method, "thread/resume" | "turn/start") {
             let id = params["threadId"].as_str().ok_or("threadId is required")?;
-            let workspace = self.worktrees.get(id)?;
+            let workspace = self.worktrees.get_session(id)?;
             if let Some(workspace) = &workspace {
-                self.worktrees.validate(workspace).await?;
+                self.worktrees.validate_session(workspace).await?;
                 if method == "thread/resume" {
                     params["cwd"] = json!(workspace.cwd);
+                    params["runtimeWorkspaceRoots"] = json!(workspace.roots);
                 }
             } else if method == "thread/resume" {
                 params.as_object_mut().unwrap().remove("cwd");
@@ -419,8 +594,10 @@ impl Engine {
         } else {
             None
         };
+        params.as_object_mut().unwrap().remove("projectId");
         if method == "thread/resume" {
             let id = params["threadId"].as_str().ok_or("threadId is required")?;
+            self.agents.require_chat_ready(id).await?;
             if let Ok(binding) = self.agents.store.session_binding(id).await {
                 if matches!(binding.kind.as_str(), "task" | "learning") {
                     // Inspect a scheduler-owned thread without changing its execution settings.
@@ -433,7 +610,17 @@ impl Engine {
                 }
                 params["developerInstructions"] =
                     json!(crate::agent_protocol::instructions(&binding.kind));
-                params["config"] = crate::agent_protocol::thread_config(&binding.kind);
+                params["config"] = workspace
+                    .as_ref()
+                    .map(|w| crate::agent_host::workspace_config(&binding.kind, w))
+                    .unwrap_or_else(|| crate::agent_protocol::thread_config(&binding.kind));
+            } else {
+                params["developerInstructions"] =
+                    json!(crate::agent_protocol::instructions("baseline"));
+                params["config"] = workspace
+                    .as_ref()
+                    .map(|w| crate::agent_host::workspace_config("baseline", w))
+                    .unwrap_or_else(|| crate::agent_protocol::thread_config("baseline"));
             }
         }
         if matches!(method, "turn/start" | "turn/steer") {
@@ -456,19 +643,45 @@ impl Engine {
             params["developerInstructions"] =
                 json!(crate::agent_protocol::instructions("baseline"));
             params["dynamicTools"] = json!(crate::agent_protocol::tools("baseline"));
-            params["config"] = crate::agent_protocol::thread_config("baseline");
+            params["config"] = workspace
+                .as_ref()
+                .map(|w| crate::agent_host::workspace_config("baseline", w))
+                .unwrap_or_else(|| crate::agent_protocol::thread_config("baseline"));
         }
+        let stop_question_source = if matches!(method, "turn/interrupt" | "thread/archive") {
+            params["threadId"].as_str().map(str::to_owned)
+        } else {
+            None
+        };
+        let branch_archive_transition = match method {
+            "thread/archive" => params["threadId"]
+                .as_str()
+                .map(|thread_id| (thread_id.to_owned(), true)),
+            "thread/unarchive" => params["threadId"]
+                .as_str()
+                .map(|thread_id| (thread_id.to_owned(), false)),
+            _ => None,
+        };
         let mut response = self.raw(method, params).await.map_err(|error| {
             if method == "thread/start" {
                 if let Some(workspace) = &workspace {
-                    return format!(
-                        "{error}. Worktree retained at {} ({})",
-                        workspace.path, workspace.branch
-                    );
+                    return format!("{error}. Prepared workspace retained at {}", workspace.cwd);
                 }
             }
             error
         })?;
+        if let Some((thread_id, archived)) = branch_archive_transition {
+            self.agents
+                .record_branch_archive(&thread_id, archived)
+                .await?;
+        }
+        if let Some(thread_id) = stop_question_source {
+            self.agents
+                .store
+                .close_questions(&thread_id, None, "The conversation was stopped or archived")
+                .await?;
+            self.agents.questions_changed(Some(&thread_id));
+        }
         if method == "thread/start" {
             let workspace = workspace
                 .as_ref()
@@ -476,15 +689,40 @@ impl Engine {
             let id = response["thread"]["id"]
                 .as_str()
                 .ok_or("The runtime did not return a thread ID")?;
-            self.worktrees.save(id, workspace).map_err(|error| {
-                format!(
-                    "{error}. Thread {id} and worktree {} were retained.",
-                    workspace.path
-                )
-            })?;
+            self.worktrees
+                .save_session(id, workspace)
+                .map_err(|error| {
+                    format!(
+                        "{error}. Thread {id} and workspace {} were retained.",
+                        workspace.cwd
+                    )
+                })?;
             self.agents
-                .bind_baseline(&response["thread"], Some(workspace.project_path.clone()))
+                .bind_baseline(&response["thread"], workspace.scope_project_id.clone())
                 .await?;
+            self.agents.register_fresh_chat(id);
+            self.agents
+                .projects
+                .set_membership(id, requested_project_id.as_deref())
+                .await?;
+        }
+        if method == "thread/resume" {
+            let id = response["thread"]["id"]
+                .as_str()
+                .ok_or("The runtime did not return a thread ID")?;
+            match self.agents.store.session_binding(id).await {
+                Ok(binding) if matches!(binding.kind.as_str(), "baseline" | "agent") => {
+                    self.raw(
+                        "thread/dynamicTools/replace",
+                        json!({"threadId":id,"tools":crate::agent_protocol::tools(&binding.kind)}),
+                    )
+                    .await?;
+                }
+                Ok(_) => {}
+                // Legacy threads stay unbound. Runtime config enables its fixed
+                // per-turn UI tool without granting host memory permissions.
+                Err(_) => {}
+            }
         }
         if matches!(method, "thread/start" | "thread/resume" | "thread/read") {
             self.annotate_thread(&mut response["thread"]);
@@ -501,9 +739,14 @@ impl Engine {
     }
 
     fn annotate_thread(&self, thread: &mut Value) {
-        if let Some(id) = thread["id"].as_str() {
-            match self.worktrees.get(id) {
-                Ok(Some(workspace)) => thread["worktree"] = json!(workspace),
+        if let Some(id) = thread["id"].as_str().map(str::to_owned) {
+            match self.worktrees.get_session(&id) {
+                Ok(Some(workspace)) => {
+                    if let Some(worktree) = workspace.worktrees.first() {
+                        thread["worktree"] = json!(worktree);
+                    }
+                    thread["workspace"] = json!(workspace);
+                }
                 Err(error) => thread["worktreeError"] = json!(error),
                 Ok(None) => {}
             }
@@ -578,6 +821,114 @@ impl Engine {
     }
 }
 
+struct EngineArchiveBackend<'a> {
+    engine: &'a Engine,
+}
+
+impl crate::project_archive::ArchiveBackend for EngineArchiveBackend<'_> {
+    async fn list(&self, archived: bool, cursor: Option<&str>) -> Result<Value, String> {
+        self.engine
+            .raw(
+                "thread/list",
+                archive_thread_list_params(archived, cursor, None),
+            )
+            .await
+    }
+
+    async fn list_descendants(
+        &self,
+        ancestor_thread_id: &str,
+        archived: bool,
+        cursor: Option<&str>,
+    ) -> Result<Value, String> {
+        self.engine
+            .raw(
+                "thread/list",
+                archive_thread_list_params(archived, cursor, Some(ancestor_thread_id)),
+            )
+            .await
+    }
+
+    async fn read(&self, thread_id: &str) -> Result<Value, String> {
+        self.engine
+            .raw("thread/read", json!({"threadId": thread_id}))
+            .await
+    }
+
+    async fn archive(&self, thread_id: &str) -> Result<(), String> {
+        self.engine
+            .request("thread/archive", json!({"threadId": thread_id}))
+            .await
+            .and_then(|response| {
+                response
+                    .as_object()
+                    .map(|_| ())
+                    .ok_or_else(|| "thread/archive returned malformed data".into())
+            })
+    }
+
+    async fn bindings(&self) -> Result<Vec<crate::project_archive::BindingInfo>, String> {
+        self.engine
+            .agents
+            .store
+            .list_bindings(None)
+            .await
+            .map(|bindings| {
+                bindings
+                    .into_iter()
+                    .map(|binding| crate::project_archive::BindingInfo {
+                        thread_id: binding.thread_id,
+                        project_id: binding.project_id,
+                        kind: binding.kind,
+                        cwd: binding.cwd,
+                    })
+                    .collect()
+            })
+    }
+
+    async fn membership(&self, thread_id: &str) -> Result<Option<String>, String> {
+        self.engine.agents.projects.membership(thread_id).await
+    }
+}
+
+fn archive_thread_list_params(
+    archived: bool,
+    cursor: Option<&str>,
+    ancestor_thread_id: Option<&str>,
+) -> Value {
+    let mut params = json!({
+        "archived": archived,
+        "limit": 100,
+        "sourceKinds": ["cli", "vscode", "exec", "appServer", "subAgent", "subAgentReview", "subAgentCompact", "subAgentThreadSpawn", "subAgentOther", "unknown"]
+    });
+    if let Some(cursor) = cursor {
+        params["cursor"] = json!(cursor);
+    }
+    if let Some(ancestor) = ancestor_thread_id {
+        params["ancestorThreadId"] = json!(ancestor);
+    }
+    params
+}
+
+#[cfg(test)]
+mod project_archive_protocol_tests {
+    use super::*;
+
+    #[test]
+    fn archive_listing_is_unfiltered_and_explicitly_includes_every_source_kind() {
+        let params = archive_thread_list_params(false, Some("next"), None);
+        assert_eq!(params["archived"], false);
+        assert_eq!(params["cursor"], "next");
+        assert_eq!(params["limit"], 100);
+        assert!(params["projectId"].is_null());
+        assert!(params["cwd"].is_null());
+        assert!(params["searchTerm"].is_null());
+        assert_eq!(params["sourceKinds"].as_array().unwrap().len(), 10);
+        let descendant_params = archive_thread_list_params(false, None, Some("root"));
+        assert_eq!(descendant_params["ancestorThreadId"], "root");
+    }
+}
+
 fn raw_request_timeout(method: &str) -> Option<Duration> {
     if matches!(
         method,
@@ -638,6 +989,14 @@ mod worktree_tests;
 mod agent_tests;
 
 #[cfg(test)]
+#[path = "bridge_ticket_live_tests.rs"]
+mod ticket_live_tests;
+
+#[cfg(test)]
+#[path = "bridge_projects_tests.rs"]
+mod project_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
@@ -685,7 +1044,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn new_sessions_require_an_isolated_project_before_starting_the_runtime_thread() {
+    async fn non_git_sessions_save_direct_folders_without_inferring_project_membership() {
         let dir = tempfile::tempdir().unwrap();
         let fixture = dir.path().join("engine.py");
         std::fs::write(&fixture, r#"
@@ -703,11 +1062,17 @@ for line in sys.stdin:
             .request("thread/start", json!({"cwd": dir.path()}))
             .await;
         engine.shutdown().await;
-        assert!(
-            result.is_err(),
-            "a session was started in an unisolated folder"
+        let response = result.unwrap();
+        assert!(response["thread"]["projectId"].is_null());
+        assert_eq!(
+            response["thread"]["workspace"]["cwd"],
+            dir.path()
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .as_ref()
         );
-        assert!(result.unwrap_err().contains("Git"));
+        assert_eq!(response["thread"]["workspace"]["worktrees"], json!([]));
     }
 
     #[tokio::test]
@@ -792,6 +1157,7 @@ for line in sys.stdin:
     method=message['method']
     result={}
     if method=='account/read': result={'account':json.loads(sys.argv[1])}
+    if method=='thread/read': result={'thread':{'id':'thread-live','turns':[{'id':'turn-live','status':'inProgress','items':[]}]}}
     if method=='turn/steer':
         with open(sys.argv[2], 'w') as output: json.dump(message['params'],output)
         result={'turnId':message['params']['expectedTurnId']}
@@ -809,9 +1175,13 @@ for line in sys.stdin:
                 .unwrap();
             let result = engine.request("turn/steer", json!({"threadId":"thread-live", "expectedTurnId":"turn-live", "input":[{"type":"text", "text":"Check the parser first"}]})).await;
             if account["type"] == "chatgpt" {
-                assert_eq!(result.unwrap(), json!({"turnId":"turn-live"}));
-                let sent: Value =
+                assert_eq!(result.unwrap()["turnId"], "turn-live");
+                let mut sent: Value =
                     serde_json::from_str(&std::fs::read_to_string(&forwarded).unwrap()).unwrap();
+                assert!(sent["clientUserMessageId"]
+                    .as_str()
+                    .is_some_and(|id| !id.is_empty()));
+                sent.as_object_mut().unwrap().remove("clientUserMessageId");
                 assert_eq!(
                     sent,
                     json!({"threadId":"thread-live", "expectedTurnId":"turn-live", "input":[{"type":"text", "text":"Check the parser first", "text_elements":[]}]})

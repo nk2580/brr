@@ -54,7 +54,7 @@ test('MCP App SDK handshakes in isolated nested frames, receives results, and ga
   await page.addInitScript(({ sandboxUrl, appUri, initialResult }) => {
     const requests: any[] = []
     const thread = {
-      id: 'mcp-app-thread', preview: 'Show the calendar app', cwd: '/workspace/mcp-app', updatedAt: 1,
+      id: 'mcp-app-thread', projectId: null, preview: 'Show the calendar app', cwd: '/workspace/mcp-app', workspace: {cwd: '/workspace/mcp-app', roots: ['/workspace/mcp-app'], folders: [{source: '/workspace/mcp-app', path: '/workspace/mcp-app'}], worktrees: [], scopeProjectId: null, projectRevision: null}, updatedAt: 1,
       turns: [{ id: 'turn-1', status: 'completed', items: [
         { id: 'user-1', type: 'userMessage', content: [{ type: 'text', text: 'Open the app' }] },
         { id: 'tool-1', type: 'mcpToolCall', status: 'completed', server: 'fixture-server', tool: 'launch',
@@ -71,6 +71,22 @@ test('MCP App SDK handshakes in isolated nested frames, receives results, and ga
         if (command === 'create_mcp_sandbox') return { url: sandboxUrl, token: 'c'.repeat(64) }
         if (command === 'destroy_mcp_sandbox') { requests.push({ command, args }); return null }
         if (command === 'open_external_url') return null
+        if (command === 'list_projects') return { data: [] }
+        if (command === 'create_project') return { id: 'project-mcp', revision: 1, ...args.project, hidden: false }
+        if (command === 'save_project') return { ...args.project, revision: (args.project.revision ?? 1) + 1, hidden: false }
+        if (command === 'delete_project' || command === 'move_chat_to_project') return null
+        if (command === 'agents_request' && args.method === 'questions.list') return { data: [] }
+        if (command === 'chat_request') {
+          const {method, params = {}} = args
+          ;((window as any).__chatRequests ??= []).push({method, params})
+          if (method === 'drafts.list' || method === 'attachments.list') return []
+          if (method === 'drafts.get') throw new Error('No saved fixture draft')
+          if (method === 'drafts.save') return {...params, id: params.id, threadId: params.threadId ?? null, projectId: params.projectId ?? null, agentId: params.agentId ?? null, revision: (params.expectedRevision ?? 0) + 1, updatedAt: '2026-11-02T00:00:00Z'}
+          if (method === 'drafts.promote') return {id: params.id, threadId: params.threadId, projectId: params.projectId ?? null, agentId: params.agentId ?? null, document: params.document ?? {text: '', references: [], quotes: []}, settings: params.settings ?? {model: '', effort: 'medium', mode: 'default'}, revision: 1, updatedAt: '2026-11-02T00:00:00Z'}
+          if (method === 'foreground.submit') return {turn: {id: 'fixture-turn'}, turnId: 'fixture-turn', submission: {id: 'fixture-submission', threadId: params.threadId, status: 'accepted', revision: 1}, queued: false}
+          if (method === 'queue.list') return {entries: [], state: {paused: false}}
+          return {}
+        }
         if (command !== 'engine_request') throw new Error(`Unexpected command ${command}`)
         requests.push(args)
         const { method } = args

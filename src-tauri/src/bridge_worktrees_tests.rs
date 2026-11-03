@@ -139,6 +139,11 @@ for line in sys.stdin:
     let cwd = started["thread"]["cwd"].as_str().unwrap();
     assert_eq!(started["thread"]["brr"]["kind"], "baseline");
     assert_eq!(started["thread"]["brr"]["learningEligible"], true);
+    assert!(
+        started["thread"]["projectId"].is_null(),
+        "an ad-hoc cwd does not infer project identity"
+    );
+    assert!(started["thread"]["workspace"]["scopeProjectId"].is_null());
     let path = Path::new(cwd);
     assert_ne!(path, root.canonicalize().unwrap());
     assert!(path.join("setup-complete.txt").exists());
@@ -185,7 +190,7 @@ for line in sys.stdin:
         )
         .await
         .unwrap_err();
-    assert!(error.contains("saved worktree is missing"), "{error}");
+    assert!(error.contains("Saved session folder is missing"), "{error}");
     std::fs::write(home.join("worktrees/session-2.json"), "broken metadata").unwrap();
     let listed = engine.request("thread/list", json!({})).await.unwrap();
     assert_eq!(listed["data"].as_array().unwrap().len(), 2);

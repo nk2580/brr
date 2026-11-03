@@ -1,4 +1,6 @@
-use brr_agent_core::{AgentStore, DelegationNode, TaskAction, TaskInput, WorkflowInput};
+use brr_agent_core::{
+    AgentStore, DelegationNode, NewQuestionRequest, Question, TaskAction, TaskInput, WorkflowInput,
+};
 
 async fn open_store(path: &std::path::Path) -> AgentStore {
     let store = AgentStore::open(path).await.unwrap();
@@ -21,6 +23,7 @@ fn task(title: &str, dependencies: Vec<String>) -> TaskInput {
         project_id: None,
         model: None,
         effort: None,
+        workspace_permission: None,
         dependencies,
     }
 }
@@ -82,6 +85,174 @@ async fn ready_claims_skip_workspaces_reserved_by_running_or_waiting_tasks() {
         .await
         .unwrap();
     assert_eq!(resumed.id, owner.id);
+}
+
+#[tokio::test]
+async fn waiting_for_input_yields_worker_capacity_and_keeps_run_binding() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = open_store(dir.path()).await;
+    store
+        .update_task_settings(brr_agent_core::TaskSettings {
+            max_background: 1,
+            max_per_agent: 1,
+        })
+        .await
+        .unwrap();
+    let waiting_task = store
+        .create_task(task("needs input", vec![]))
+        .await
+        .unwrap();
+    let run = store.claim_ready("worker-1").await.unwrap().unwrap();
+    assert_eq!(run.task_id, waiting_task.id);
+    store
+        .attach_run(
+            &waiting_task.id,
+            &run.id,
+            "saved-thread",
+            "turn-1",
+            &run.lease_token,
+        )
+        .await
+        .unwrap();
+
+    let waiting = store
+        .wait_for_input(&waiting_task.id, &run.id, &run.lease_token)
+        .await
+        .unwrap();
+    assert_eq!(waiting.status, "waiting_input");
+    assert_eq!(store.get_run(&run.id).await.unwrap().state, "waiting_input");
+    assert_eq!(
+        store.get_run(&run.id).await.unwrap().thread_id.as_deref(),
+        Some("saved-thread")
+    );
+    assert!(
+        store
+            .unresolved_runs()
+            .await
+            .unwrap()
+            .iter()
+            .any(|candidate| candidate.id == run.id)
+    );
+
+    let queued_task = store.create_task(task("next task", vec![])).await.unwrap();
+    let next = store.claim_ready("worker-2").await.unwrap().unwrap();
+    assert_eq!(next.task_id, queued_task.id);
+    store
+        .control_task(&waiting_task.id, TaskAction::Cancel)
+        .await
+        .unwrap();
+    assert!(
+        store
+            .resume_run(&waiting_task.id, &run.id, &run.lease_token, "worker-3")
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn waiting_for_input_can_be_paused_and_recovered_without_losing_the_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = open_store(dir.path()).await;
+    let task = store
+        .create_task(task("pause while waiting", vec![]))
+        .await
+        .unwrap();
+    let run = store.claim_ready("worker-1").await.unwrap().unwrap();
+    store
+        .attach_run(
+            &task.id,
+            &run.id,
+            "saved-thread",
+            "turn-1",
+            &run.lease_token,
+        )
+        .await
+        .unwrap();
+    store
+        .wait_for_input(&task.id, &run.id, &run.lease_token)
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .recover_run(&run.id, &run.lease_token)
+            .await
+            .unwrap()
+            .state,
+        "waiting_input"
+    );
+    store
+        .control_task(&task.id, TaskAction::Pause)
+        .await
+        .unwrap();
+    assert_eq!(store.get_run(&run.id).await.unwrap().state, "paused");
+    store
+        .control_task(&task.id, TaskAction::Resume)
+        .await
+        .unwrap();
+    let resumed = store.claim_ready("worker-2").await.unwrap().unwrap();
+    assert_eq!(resumed.id, run.id);
+    assert_eq!(resumed.thread_id.as_deref(), Some("saved-thread"));
+}
+
+#[tokio::test]
+async fn resuming_paused_question_run_restores_waiting_input_without_reclaiming_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = open_store(dir.path()).await;
+    let task = store
+        .create_task(task("question task", vec![]))
+        .await
+        .unwrap();
+    let run = store.claim_ready("worker-1").await.unwrap().unwrap();
+    let attached = store
+        .attach_run(
+            &task.id,
+            &run.id,
+            "saved-thread",
+            "source-turn",
+            &run.lease_token,
+        )
+        .await
+        .unwrap();
+    store
+        .wait_for_input(&task.id, &run.id, &attached.lease_token)
+        .await
+        .unwrap();
+    store
+        .record_question(NewQuestionRequest {
+            thread_id: "saved-thread".into(),
+            turn_id: "source-turn".into(),
+            item_id: "item-1".into(),
+            agent_id: Some(task.agent_id.clone()),
+            task_id: Some(task.id.clone()),
+            run_id: Some(run.id.clone()),
+            kind: "blocking".into(),
+            questions: vec![Question {
+                id: "choice".into(),
+                header: "Choice".into(),
+                question: "Choose".into(),
+                options: None,
+            }],
+            runtime_generation: None,
+            runtime_request_id: None,
+        })
+        .await
+        .unwrap();
+
+    store
+        .control_task(&task.id, TaskAction::Pause)
+        .await
+        .unwrap();
+    let resumed = store
+        .control_task(&task.id, TaskAction::Resume)
+        .await
+        .unwrap();
+
+    assert_eq!(resumed.status, "waiting_input");
+    let waiting_run = store.get_run(&run.id).await.unwrap();
+    assert_eq!(waiting_run.state, "waiting_input");
+    assert_eq!(waiting_run.lease_token, attached.lease_token);
+    assert_eq!(waiting_run.thread_id.as_deref(), Some("saved-thread"));
+    assert!(store.claim_ready("worker-2").await.unwrap().is_none());
 }
 
 #[tokio::test]

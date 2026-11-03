@@ -98,7 +98,8 @@ const mergeHydratedItems = (hydrated: SessionState['items'], live: SessionState[
   return [...merged, ...live.filter(item => liveById.has(item.id))]
 }
 
-export default function App() {
+export default function App({initialThreadId}: {initialThreadId?: string} = {}) {
+  const requestedInitialThread = useRef(initialThreadId)
   const desktop = isDesktop()
   const chatDrafts = useChatDrafts(desktop)
   const [account, setAccount] = useState<Connection['account']>(null)
@@ -625,6 +626,10 @@ export default function App() {
     void client.connect().then(connection => {
       if (!active) return
       applyConnection(connection)
+      const requestedId = requestedInitialThread.current
+      requestedInitialThread.current = undefined
+      const requestedThread = connection.threads.find(thread => thread.id === requestedId)
+      if (requestedThread && viewVersion.current === 0 && draftVersion.current === 0) void openThread(requestedThread)
     }).catch(reason => { if (active) { setEngineOnline(false); setError(String(reason)) } })
     return () => { active = false; unsubscribe?.() }
   }, [desktop])

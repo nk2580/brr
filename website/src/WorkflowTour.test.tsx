@@ -1,147 +1,45 @@
-import { fireEvent, render, screen } from '@testing-library/react'
+import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it } from 'vitest'
 import { WorkflowTour } from './WorkflowTour'
 
 describe('WorkflowTour', () => {
-  it('switches between local example stories and resets to the plan', async () => {
-    const user = userEvent.setup()
+  it('embeds the actual app preview with a constrained sandbox and lazy loading', () => {
     render(<WorkflowTour />)
 
-    expect(screen.getByText('Turn my notes into a friendly workshop outline. Show me a plan first.')).toBeInTheDocument()
-    await user.click(screen.getByRole('button', { name: 'Research' }))
-    expect(screen.getByRole('button', { name: 'Research' })).toHaveAttribute('aria-pressed', 'true')
-    expect(screen.getByText(/Compare two local project notes/)).toBeInTheDocument()
-
-    await user.click(screen.getByRole('tab', { name: 'Review' }))
-    expect(screen.getByRole('tab', { name: 'Review' })).toHaveAttribute('aria-selected', 'true')
-    await user.click(screen.getByRole('button', { name: 'Making' }))
-    expect(screen.getByRole('tab', { name: 'Plan' })).toHaveAttribute('aria-selected', 'true')
-    expect(screen.getByRole('button', { name: 'Making' })).toHaveAttribute('aria-pressed', 'true')
+    const preview = screen.getByRole('region', { name: 'Desktop app preview' })
+    const frame = screen.getByTitle('Brr app preview')
+    expect(preview.contains(frame)).toBe(true)
+    expect(preview.getAttribute('tabindex')).toBe('0')
+    expect(frame.getAttribute('src')).toBe(`${import.meta.env.BASE_URL}app-preview.html`)
+    expect(frame.getAttribute('loading')).toBe('lazy')
+    expect(frame.getAttribute('sandbox')).toBe('allow-scripts allow-same-origin')
+    expect(frame.hasAttribute('allow')).toBe(false)
+    expect(frame.hasAttribute('allowfullscreen')).toBe(false)
   })
 
-  it('moves tab selection and focus with the tab-list keyboard controls', () => {
+  it('labels the preview honestly and opens it in a separate tab', () => {
     render(<WorkflowTour />)
-    const planTab = screen.getByRole('tab', { name: 'Plan' })
-    planTab.focus()
-    fireEvent.keyDown(planTab, { key: 'ArrowRight' })
-    expect(screen.getByRole('tab', { name: 'Steer' })).toHaveFocus()
-    expect(screen.getByRole('tab', { name: 'Steer' })).toHaveAttribute('aria-selected', 'true')
 
-    fireEvent.keyDown(screen.getByRole('tab', { name: 'Steer' }), { key: 'End' })
-    expect(screen.getByRole('tab', { name: 'Resume' })).toHaveFocus()
-    fireEvent.keyDown(screen.getByRole('tab', { name: 'Resume' }), { key: 'Home' })
-    expect(planTab).toHaveFocus()
-    fireEvent.keyDown(planTab, { key: 'ArrowLeft' })
-    expect(screen.getByRole('tab', { name: 'Resume' })).toHaveFocus()
+    expect(screen.getByText('Actual Brr interface · Sample workspace. No agent is running.')).toBeTruthy()
+    const openPreview = screen.getByRole('link', { name: 'Open full preview' })
+    expect(openPreview.getAttribute('href')).toBe(`${import.meta.env.BASE_URL}app-preview.html`)
+    expect(openPreview.getAttribute('target')).toBe('_blank')
+    expect(openPreview.getAttribute('rel')).toBe('noreferrer')
   })
 
-  it('returns the transcript panel to the top when the stage or story changes', async () => {
+  it('resets by remounting the same preview and has no synthetic tour controls', async () => {
     const user = userEvent.setup()
     render(<WorkflowTour />)
-    await user.click(screen.getByRole('button', { name: 'Implement plan' }))
+    const initialFrame = screen.getByTitle('Brr app preview')
 
-    const panel = screen.getByRole('tabpanel')
-    const instruction = screen.getByLabelText('Follow-up message')
-    await user.type(instruction, 'Keep the draft while I review the plan.')
-    panel.scrollTop = 420
-    await user.click(screen.getByRole('tab', { name: 'Review' }))
-    expect(panel.scrollTop).toBe(0)
+    await user.click(screen.getByRole('button', { name: 'Reset preview' }))
 
-    await user.click(screen.getByRole('tab', { name: 'Steer' }))
-    expect(screen.getByLabelText('Follow-up message')).toHaveValue('Keep the draft while I review the plan.')
-    await user.click(screen.getByRole('button', { name: 'Stop demo' }))
-    expect(screen.getByRole('status')).toHaveTextContent(/nothing is sent automatically/i)
-    await user.click(screen.getByRole('tab', { name: 'Review' }))
-    await user.click(screen.getByRole('tab', { name: 'Steer' }))
-    expect(screen.getByRole('button', { name: 'Continue demo' })).toBeInTheDocument()
-    expect(screen.getByLabelText('Follow-up message')).toHaveValue('Keep the draft while I review the plan.')
-
-    panel.scrollTop = 280
-    await user.click(screen.getByRole('button', { name: 'Making' }))
-    expect(panel.scrollTop).toBe(0)
-  })
-
-  it('hands the proposed plan to the next stage only when requested', async () => {
-    const user = userEvent.setup()
-    render(<WorkflowTour />)
-    expect(screen.getAllByRole('listitem')[0]).toHaveTextContent('Group the notes into a clear workshop flow')
-    expect(screen.getByRole('tab', { name: 'Steer' })).toHaveAttribute('aria-selected', 'false')
-
-    await user.click(screen.getByRole('button', { name: 'Implement plan' }))
-    expect(screen.getByRole('tab', { name: 'Steer' })).toHaveAttribute('aria-selected', 'true')
-    expect(screen.getByLabelText('Follow-up message')).toBeInTheDocument()
-  })
-
-  it('queues the default follow-up and keeps stopping separate from queueing', async () => {
-    const user = userEvent.setup()
-    render(<WorkflowTour />)
-    await user.click(screen.getByRole('button', { name: 'Implement plan' }))
-    const input = screen.getByLabelText('Follow-up message')
-    await user.type(input, 'Keep the opening warm and concise.')
-    await user.click(screen.getByRole('button', { name: 'Queue message' }))
-    expect(screen.getByText('Keep the opening warm and concise.')).toBeInTheDocument()
-    expect(screen.getByText('Keep the opening warm and concise.').previousSibling).toHaveTextContent('QUEUED MESSAGE')
-    expect(screen.getByRole('tab', { name: 'Steer' })).toHaveAttribute('aria-selected', 'true')
-    expect(screen.getByRole('button', { name: 'Stop demo' })).toBeInTheDocument()
-
-    await user.click(screen.getByRole('button', { name: 'Stop demo' }))
-    expect(screen.getByRole('status')).toHaveTextContent(/nothing is sent automatically/i)
-    expect(screen.getByText('Keep the opening warm and concise.')).toBeInTheDocument()
-    await user.click(screen.getByRole('button', { name: 'Continue demo' }))
-    expect(screen.getByRole('status')).toHaveTextContent('Demo continued.')
-    expect(screen.getByText('Keep the opening warm and concise.')).toBeInTheDocument()
-  })
-
-  it('queues follow-ups by default and records Steer now only when explicitly chosen', async () => {
-    const user = userEvent.setup()
-    render(<WorkflowTour />)
-    await user.click(screen.getByRole('button', { name: 'Implement plan' }))
-    const input = screen.getByLabelText('Follow-up message')
-    await user.type(input, 'Keep the opening warm and concise.')
-    await user.click(screen.getByRole('button', { name: 'Queue message' }))
-    expect(screen.getByText('Keep the opening warm and concise.').previousSibling).toHaveTextContent('QUEUED MESSAGE')
-    expect(screen.getByRole('status')).toHaveTextContent('Queued for this example. Nothing was sent.')
-
-    await user.type(input, 'Use the shorter title now.')
-    await user.click(screen.getByRole('button', { name: 'Steer now' }))
-    expect(screen.getByText('Use the shorter title now.').previousSibling).toHaveTextContent('STEERED NOW')
-    expect(screen.getByText('Keep the opening warm and concise.').previousSibling).toHaveTextContent('QUEUED MESSAGE')
-    await user.type(input, 'Add one more thought to the queue.')
-    await user.click(screen.getByRole('button', { name: 'Queue message' }))
-    expect(Array.from(document.querySelectorAll('.tour-sent-instruction .tour-message-label')).map((label) => label.textContent)).toEqual([
-      'QUEUED MESSAGE', 'STEERED NOW', 'QUEUED MESSAGE',
-    ])
-    await user.click(screen.getByRole('button', { name: 'Stop demo' }))
-    expect(screen.getByText('Keep the opening warm and concise.')).toBeInTheDocument()
-    expect(screen.getByRole('status')).toHaveTextContent(/nothing is sent automatically/i)
-  })
-
-  it('shows review changes and returns to a reset plan', async () => {
-    const user = userEvent.setup()
-    render(<WorkflowTour />)
-    await user.click(screen.getByRole('tab', { name: 'Review' }))
-    const diff = screen.getByLabelText('Illustrative changes')
-    expect(diff.tagName).toBe('PRE')
-    expect(diff).toHaveTextContent(/^-\s+Workshop notes/m)
-    expect(diff.querySelector('.tour-diff-added')).toHaveTextContent('+ Friendly workshop outline')
-    expect(screen.getByText(/Read through the changes and keep or change whatever you like/)).toBeInTheDocument()
-
-    await user.click(screen.getByRole('tab', { name: 'Resume' }))
-    expect(screen.getByText(/Example transcript from an earlier session/i)).toBeInTheDocument()
-    await user.click(screen.getByRole('button', { name: 'Return to plan' }))
-    expect(screen.getByRole('tab', { name: 'Plan' })).toHaveAttribute('aria-selected', 'true')
-    expect(screen.getAllByRole('listitem')[0]).toHaveTextContent('Group the notes into a clear workshop flow')
-    expect(screen.queryByLabelText('Follow-up message')).not.toBeInTheDocument()
-  })
-
-  it('shows a command summary for a making review only', async () => {
-    const user = userEvent.setup()
-    render(<WorkflowTour />)
-    await user.click(screen.getByRole('button', { name: 'Making' }))
-    await user.click(screen.getByRole('tab', { name: 'Review' }))
-    expect(screen.getByText(/Example command: pnpm test/)).toBeInTheDocument()
-    await user.click(screen.getByRole('button', { name: 'Writing' }))
-    expect(screen.queryByText(/Example command:/)).not.toBeInTheDocument()
+    const resetFrame = screen.getByTitle('Brr app preview')
+    expect(resetFrame).not.toBe(initialFrame)
+    expect(resetFrame.getAttribute('src')).toBe(`${import.meta.env.BASE_URL}app-preview.html`)
+    expect(screen.queryByRole('tablist')).toBeNull()
+    expect(screen.queryByRole('button', { name: /Writing|Research|Making|Plan|Steer|Review|Resume/ })).toBeNull()
+    expect(screen.queryByText(/Group the notes into a clear workshop flow/)).toBeNull()
   })
 })

@@ -143,6 +143,38 @@ async function openChatOptions() {
 }
 
 describe('desktop workspace', () => {
+  it('opens a requested initial chat without creating a thread or sending a message', async () => {
+    const thread = {id: 'preview-writing', cwd: '/project', preview: 'Workshop outline', updatedAt: 1}
+    backend.connect.mockResolvedValueOnce({account: null, models: [], threads: [thread]} as never)
+    backend.resume.mockResolvedValueOnce({thread: {...thread, turns: []}})
+    render(<App initialThreadId="preview-writing" />)
+    await waitFor(() => expect(backend.resume).toHaveBeenCalledWith('preview-writing'))
+    expect(backend.start).not.toHaveBeenCalled()
+    expect(backend.send).not.toHaveBeenCalled()
+    expect(chatApi.submit).not.toHaveBeenCalled()
+  })
+
+  it('does not replace a newer draft with an initial chat when connection finishes late', async () => {
+    let connected!: (value: any) => void
+    backend.connect.mockImplementationOnce(() => new Promise(resolve => { connected = resolve }))
+    render(<App initialThreadId="preview-writing" />)
+    await userEvent.click(screen.getByRole('button', {name: 'New conversation'}))
+    await userEvent.type(screen.getByRole('textbox', {name: 'Message'}), 'Keep my new draft')
+    await act(async () => connected({account: null, models: [], threads: [{id: 'preview-writing', cwd: '/project', preview: 'Workshop outline', updatedAt: 1}]}))
+    expect(backend.resume).not.toHaveBeenCalled()
+    expect(screen.getByRole('textbox', {name: 'Message'})).toHaveValue('Keep my new draft')
+  })
+
+  it('keeps text typed before connecting instead of opening the initial chat', async () => {
+    let connected!: (value: any) => void
+    backend.connect.mockImplementationOnce(() => new Promise(resolve => { connected = resolve }))
+    render(<App initialThreadId="preview-writing" />)
+    await userEvent.type(screen.getByRole('textbox', {name: 'Message'}), 'Already writing here')
+    await act(async () => connected({account: null, models: [], threads: [{id: 'preview-writing', cwd: '/project', preview: 'Workshop outline', updatedAt: 1}]}))
+    expect(backend.resume).not.toHaveBeenCalled()
+    expect(screen.getByRole('textbox', {name: 'Message'})).toHaveValue('Already writing here')
+  })
+
   beforeEach(() => { localStorage.clear(); vi.clearAllMocks(); chatApi.recovery.list.mockResolvedValue({items: []}); chatApi.recovery.restore.mockResolvedValue({target:'draft',draft:null,attachments:[],restored:true} as never); chatApi.pendingBranches.mockResolvedValue({data: []} as never); backend.projects.mockResolvedValue({data: [mainProject]}); backend.threads.mockResolvedValue([]); chatApi.records = []; uiApi.task = null; agentApi.questions.list.mockResolvedValue({ data: [] }); ticketApi.projects.mockResolvedValue({ data: [{ id: 'project-tickets', name: 'project', folders: ['/project'], primaryFolder: '/project', revision: 1, hidden: false }] }); ticketApi.agents.mockResolvedValue({ data: [] }); ticketApi.list.mockResolvedValue({ data: [], nextCursor: null }); ticketApi.proposals.mockResolvedValue({ data: [] }) })
   it('lists saved messages after a cold reload without opening the unavailable runtime chat', async () => {
     const saved = {sourceId:'submission-cold',sourceKind:'submission',threadId:'missing-thread',kind:'baseline',projectId:'project-main',agentId:'',status:'queued',text:'Keep this unsent request',settings:{model:'gpt-5.6',effort:'low',mode:'default'},attachmentIds:[],createdAt:'2026-11-03T00:00:00Z',revision:2,restorable:true}

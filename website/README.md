@@ -29,6 +29,15 @@ the `gh-pages` package to publish only that output, including `.nojekyll`, to
 also works in a standalone website checkout. Source changes belong on `main`;
 publish the built website separately with `pnpm pages:deploy`.
 
-The source download links directly to the versioned GitHub release asset.
-Website builds do not rebuild or modify that frozen release. The old Sites
-preview is not a deployment target; no Sites hosting manifest is retained.
+The primary source link opens the current `main` checkout. Build commands use
+`git clone --recurse-submodules` to include the pinned native WorkTrunk source.
+The secondary v0.1.0 archive link identifies an older source snapshot; website
+builds do not rebuild or modify that frozen release. GitHub's automatic source
+ZIPs do not include submodule contents. The old Sites preview is not a deployment
+target; no Sites hosting manifest is retained.
+
+The tour demonstrates Plan, queued follow-ups, explicit Steer now, Stop and
+review using local example state. It never starts an agent or sends inference.
+Product copy follows the desktop's chat drafts/context, project buckets, named
+agents, Tickets, Plugins and owned ChatGPT-only runtime. Keep those claims and
+the downloadable notices aligned with the root project when publishing.

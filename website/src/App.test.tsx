@@ -18,7 +18,8 @@ describe('Brr marketing page', () => {
     expect(localDocumentLinks).toEqual([
       '/brr/CONTRIBUTING.md', '/brr/UPSTREAM.md', '/brr/LICENSE.txt', '/brr/NOTICE.txt', '/brr/GOVERNANCE.md',
     ])
-    expect(screen.getByRole('link', { name: 'Download source' })).toHaveAttribute('href', 'https://github.com/nk2580/brr/releases/download/v0.1.0/brr-source.tar.gz')
+    expect(screen.getByRole('link', { name: /View latest source/ })).toHaveAttribute('href', 'https://github.com/nk2580/brr/tree/main')
+    expect(screen.getByRole('link', { name: 'v0.1.0 source archive' })).toHaveAttribute('href', 'https://github.com/nk2580/brr/releases/download/v0.1.0/brr-source.tar.gz')
     expect(screen.getByRole('link', { name: 'Possibilities' })).toHaveAttribute('href', '#possibilities')
   })
 
@@ -26,8 +27,11 @@ describe('Brr marketing page', () => {
     render(<App />)
     expect(screen.getByRole('heading', { level: 1, name: /Your work. Your way./ })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: 'Explore Brr' })).toHaveAttribute('href', '#possibilities')
-    expect(screen.getByRole('link', { name: 'Download source' })).toHaveAttribute('href', 'https://github.com/nk2580/brr/releases/download/v0.1.0/brr-source.tar.gz')
+    expect(screen.getByRole('link', { name: /View latest source/ })).toHaveAttribute('href', 'https://github.com/nk2580/brr/tree/main')
     expect(screen.getByRole('heading', { name: 'A harness you can make your own.' })).toBeInTheDocument()
+    expect(document.querySelector('.workspace-copy')).toHaveTextContent(/persistent named agents/i)
+    expect(document.querySelector('.workspace-copy')).toHaveTextContent(/project buckets/i)
+    expect(screen.queryByText(/available as `wt`/i)).not.toBeInTheDocument()
   })
 
   it('copies the selected source-build commands and reports success', async () => {
@@ -36,7 +40,7 @@ describe('Brr marketing page', () => {
     render(<App />)
     await user.click(screen.getByRole('tab', { name: 'Package the app' }))
     await user.click(screen.getByRole('button', { name: 'Copy commands' }))
-    expect(writeText).toHaveBeenCalledWith('pnpm install\nAPPLE_SIGNING_IDENTITY=- pnpm desktop:build')
+    expect(writeText).toHaveBeenCalledWith('git clone --recurse-submodules https://github.com/nk2580/brr.git\ncd brr\npnpm install\nAPPLE_SIGNING_IDENTITY=- pnpm desktop:build')
     expect(screen.getByRole('status', { name: 'Copy feedback' })).toHaveTextContent('Commands copied.')
     writeText.mockRestore()
   })

@@ -3,6 +3,7 @@ import { ArrowRight, FileText, Hammer, Search, Send, Square, Sparkles, Play } fr
 
 type StoryKey = 'writing' | 'research' | 'making'
 type Stage = 'plan' | 'steer' | 'review' | 'resume'
+type FollowUp = { kind: 'queued' | 'steered'; text: string }
 
 const stories: Record<StoryKey, {
   label: string
@@ -67,7 +68,7 @@ export function WorkflowTour() {
   const [storyKey, setStoryKey] = useState<StoryKey>('writing')
   const [stage, setStage] = useState<Stage>('plan')
   const [instruction, setInstruction] = useState('')
-  const [sentInstructions, setSentInstructions] = useState<string[]>([])
+  const [followUps, setFollowUps] = useState<FollowUp[]>([])
   const [stopped, setStopped] = useState(false)
   const [feedback, setFeedback] = useState('')
   const tabRefs = useRef<Array<HTMLButtonElement | null>>([])
@@ -82,7 +83,7 @@ export function WorkflowTour() {
     setStoryKey(key)
     setStage('plan')
     setInstruction('')
-    setSentInstructions([])
+    setFollowUps([])
     setStopped(false)
     setFeedback('')
   }
@@ -105,27 +106,34 @@ export function WorkflowTour() {
     tabRefs.current[nextIndex]?.focus()
   }
 
-  function sendInstruction() {
+  function queueMessage() {
     if (!instruction.trim() || stopped) return
-    setSentInstructions((current) => [...current, instruction])
+    setFollowUps((current) => [...current, { kind: 'queued', text: instruction }])
     setInstruction('')
-    setFeedback('Instruction added to this example conversation.')
+    setFeedback('Queued for this example. Nothing was sent.')
+  }
+
+  function steerNow() {
+    if (!instruction.trim() || stopped) return
+    setFollowUps((current) => [...current, { kind: 'steered', text: instruction }])
+    setInstruction('')
+    setFeedback('Steer now selected in this example. No agent is running.')
   }
 
   function stopDemo() {
     setStopped(true)
-    setFeedback('Demo stopped. Your instruction is still here.')
+    setFeedback('Demo stopped. Queued messages remain queued; nothing is sent automatically.')
   }
 
   function continueDemo() {
     setStopped(false)
-    setFeedback('Demo continued.')
+    setFeedback('Demo continued. Queued messages stay queued until you choose what happens next.')
   }
 
   function returnToPlan() {
     setStage('plan')
     setInstruction('')
-    setSentInstructions([])
+    setFollowUps([])
     setStopped(false)
     setFeedback('Returned to the plan.')
   }
@@ -215,14 +223,14 @@ export function WorkflowTour() {
                   <div className="tour-message-user"><span className="tour-message-label">YOU ASKED</span><p>{story.task}</p></div>
                   <div className="tour-message-agent">
                     <span className="tour-message-label"><Sparkles size={13} aria-hidden="true" /> Working through your plan</span>
-                    <p>This tour shows how you can add a direction while work is in progress.</p>
+                    <p>Queue is the default for a follow-up. Choose Steer now to direct an active turn immediately. This example records your choice only.</p>
                   </div>
-                  {sentInstructions.map((text, index) => (
-                    <div className="tour-message-user tour-sent-instruction" key={`${index}-${text}`}><span className="tour-message-label">YOUR INSTRUCTION</span><p>{text}</p></div>
+                  {followUps.map(({ kind, text }, index) => (
+                    <div className="tour-message-user tour-sent-instruction" key={`${kind}-${index}-${text}`}><span className="tour-message-label">{kind === 'queued' ? 'QUEUED MESSAGE' : 'STEERED NOW'}</span><p>{text}</p></div>
                   ))}
                   {stopped && <p className="tour-stopped-note">The example is paused. Your conversation stays visible.</p>}
                   <div className="tour-composer">
-                    <label htmlFor="tour-instruction">Steering instruction</label>
+                    <label htmlFor="tour-instruction">Follow-up message</label>
                     <textarea
                       id="tour-instruction"
                       maxLength={240}
@@ -233,9 +241,12 @@ export function WorkflowTour() {
                     />
                     <div className="tour-composer-actions">
                       <span>{instruction.length}/240</span>
-                      <button className="tour-primary-button" type="button" onClick={sendInstruction} disabled={!instruction.trim() || stopped}>
-                        <Send size={14} aria-hidden="true" /> Send instruction
-                      </button>
+                      <div className="tour-composer-buttons" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                        <button className="tour-primary-button" type="button" onClick={queueMessage} disabled={!instruction.trim() || stopped}>
+                          <Send size={14} aria-hidden="true" /> Queue message
+                        </button>
+                        <button className="tour-text-button" type="button" onClick={steerNow} disabled={!instruction.trim() || stopped}>Steer now</button>
+                      </div>
                     </div>
                   </div>
                   <div className="tour-demo-controls">

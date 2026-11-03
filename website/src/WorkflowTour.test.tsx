@@ -42,20 +42,20 @@ describe('WorkflowTour', () => {
     await user.click(screen.getByRole('button', { name: 'Implement plan' }))
 
     const panel = screen.getByRole('tabpanel')
-    const instruction = screen.getByLabelText('Steering instruction')
+    const instruction = screen.getByLabelText('Follow-up message')
     await user.type(instruction, 'Keep the draft while I review the plan.')
     panel.scrollTop = 420
     await user.click(screen.getByRole('tab', { name: 'Review' }))
     expect(panel.scrollTop).toBe(0)
 
     await user.click(screen.getByRole('tab', { name: 'Steer' }))
-    expect(screen.getByLabelText('Steering instruction')).toHaveValue('Keep the draft while I review the plan.')
+    expect(screen.getByLabelText('Follow-up message')).toHaveValue('Keep the draft while I review the plan.')
     await user.click(screen.getByRole('button', { name: 'Stop demo' }))
-    expect(screen.getByRole('status')).toHaveTextContent('Demo stopped. Your instruction is still here.')
+    expect(screen.getByRole('status')).toHaveTextContent(/nothing is sent automatically/i)
     await user.click(screen.getByRole('tab', { name: 'Review' }))
     await user.click(screen.getByRole('tab', { name: 'Steer' }))
     expect(screen.getByRole('button', { name: 'Continue demo' })).toBeInTheDocument()
-    expect(screen.getByLabelText('Steering instruction')).toHaveValue('Keep the draft while I review the plan.')
+    expect(screen.getByLabelText('Follow-up message')).toHaveValue('Keep the draft while I review the plan.')
 
     panel.scrollTop = 280
     await user.click(screen.getByRole('button', { name: 'Making' }))
@@ -70,26 +70,51 @@ describe('WorkflowTour', () => {
 
     await user.click(screen.getByRole('button', { name: 'Implement plan' }))
     expect(screen.getByRole('tab', { name: 'Steer' })).toHaveAttribute('aria-selected', 'true')
-    expect(screen.getByLabelText('Steering instruction')).toBeInTheDocument()
+    expect(screen.getByLabelText('Follow-up message')).toBeInTheDocument()
   })
 
-  it('sends exact steering text and keeps stopping separate from instruction sending', async () => {
+  it('queues the default follow-up and keeps stopping separate from queueing', async () => {
     const user = userEvent.setup()
     render(<WorkflowTour />)
     await user.click(screen.getByRole('button', { name: 'Implement plan' }))
-    const input = screen.getByLabelText('Steering instruction')
+    const input = screen.getByLabelText('Follow-up message')
     await user.type(input, 'Keep the opening warm and concise.')
-    await user.click(screen.getByRole('button', { name: 'Send instruction' }))
+    await user.click(screen.getByRole('button', { name: 'Queue message' }))
     expect(screen.getByText('Keep the opening warm and concise.')).toBeInTheDocument()
+    expect(screen.getByText('Keep the opening warm and concise.').previousSibling).toHaveTextContent('QUEUED MESSAGE')
     expect(screen.getByRole('tab', { name: 'Steer' })).toHaveAttribute('aria-selected', 'true')
     expect(screen.getByRole('button', { name: 'Stop demo' })).toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: 'Stop demo' }))
-    expect(screen.getByRole('status')).toHaveTextContent('Demo stopped. Your instruction is still here.')
+    expect(screen.getByRole('status')).toHaveTextContent(/nothing is sent automatically/i)
     expect(screen.getByText('Keep the opening warm and concise.')).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Continue demo' }))
     expect(screen.getByRole('status')).toHaveTextContent('Demo continued.')
     expect(screen.getByText('Keep the opening warm and concise.')).toBeInTheDocument()
+  })
+
+  it('queues follow-ups by default and records Steer now only when explicitly chosen', async () => {
+    const user = userEvent.setup()
+    render(<WorkflowTour />)
+    await user.click(screen.getByRole('button', { name: 'Implement plan' }))
+    const input = screen.getByLabelText('Follow-up message')
+    await user.type(input, 'Keep the opening warm and concise.')
+    await user.click(screen.getByRole('button', { name: 'Queue message' }))
+    expect(screen.getByText('Keep the opening warm and concise.').previousSibling).toHaveTextContent('QUEUED MESSAGE')
+    expect(screen.getByRole('status')).toHaveTextContent('Queued for this example. Nothing was sent.')
+
+    await user.type(input, 'Use the shorter title now.')
+    await user.click(screen.getByRole('button', { name: 'Steer now' }))
+    expect(screen.getByText('Use the shorter title now.').previousSibling).toHaveTextContent('STEERED NOW')
+    expect(screen.getByText('Keep the opening warm and concise.').previousSibling).toHaveTextContent('QUEUED MESSAGE')
+    await user.type(input, 'Add one more thought to the queue.')
+    await user.click(screen.getByRole('button', { name: 'Queue message' }))
+    expect(Array.from(document.querySelectorAll('.tour-sent-instruction .tour-message-label')).map((label) => label.textContent)).toEqual([
+      'QUEUED MESSAGE', 'STEERED NOW', 'QUEUED MESSAGE',
+    ])
+    await user.click(screen.getByRole('button', { name: 'Stop demo' }))
+    expect(screen.getByText('Keep the opening warm and concise.')).toBeInTheDocument()
+    expect(screen.getByRole('status')).toHaveTextContent(/nothing is sent automatically/i)
   })
 
   it('shows review changes and returns to a reset plan', async () => {
@@ -107,7 +132,7 @@ describe('WorkflowTour', () => {
     await user.click(screen.getByRole('button', { name: 'Return to plan' }))
     expect(screen.getByRole('tab', { name: 'Plan' })).toHaveAttribute('aria-selected', 'true')
     expect(screen.getAllByRole('listitem')[0]).toHaveTextContent('Group the notes into a clear workshop flow')
-    expect(screen.queryByLabelText('Steering instruction')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Follow-up message')).not.toBeInTheDocument()
   })
 
   it('shows a command summary for a making review only', async () => {

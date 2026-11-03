@@ -1,4 +1,5 @@
 node_modules/
+.pnpm-store/
 dist/
 .tools/
 .cache/
@@ -33,4 +34,5 @@ projects/desktop-agent/verification.md
 projects/**/evidence/
 projects/**/state.json
 projects/**/verification.md
+/evidence/
 website/public/downloads/

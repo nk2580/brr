@@ -20,6 +20,8 @@ test('selects releasable source and attribution while excluding local and genera
       'website/.openai/hosting.json', 'website/.sites-runtime/runtime.json',
       'website/src/app.tsbuildinfo', 'website/assets/raw-previews/hero.png',
       'website/public/assets/hero.webp', 'website/public/downloads/brr-source.tar.gz',
+      'public/assets/fonts/archivo-latin.woff2', 'public/assets/fonts/OFL.txt',
+      'fixtures/intelligent-ui-documents.json', '.pnpm-store/local.sqlite', 'evidence/qa/screenshot.png',
       'scripts/deployment.tar.gz', 'runtime/codex/tests/fixtures/upstream.tar.gz',
       '.env.example', '.env', 'account.env', 'projects/desktop-agent/evidence/session.json',
       'projects/desktop-agent/state.json', 'AGENTS.md', 'CONTEXT.md',
@@ -51,8 +53,11 @@ test('selects releasable source and attribution while excluding local and genera
     assert.ok(selected.includes('docs/adr/001-owned-runtime.md'))
     assert.ok(selected.includes('website/src/main.tsx'))
     assert.ok(selected.includes('website/public/assets/hero.webp'))
+    assert.ok(selected.includes('public/assets/fonts/archivo-latin.woff2'))
+    assert.ok(selected.includes('public/assets/fonts/OFL.txt'))
+    assert.ok(selected.includes('fixtures/intelligent-ui-documents.json'))
     assert.ok(selected.includes('runtime/codex/tests/fixtures/upstream.tar.gz'))
-    for (const excluded of ['docs/native-qa.md', 'website/.openai/hosting.json', 'website/.sites-runtime/runtime.json', 'website/src/app.tsbuildinfo', 'website/assets/raw-previews/hero.png', 'website/public/downloads/brr-source.tar.gz', 'scripts/deployment.tar.gz', 'e2e/test-results/screenshot.png', 'e2e/screenshots/manual.png']) {
+    for (const excluded of ['docs/native-qa.md', 'website/.openai/hosting.json', 'website/.sites-runtime/runtime.json', 'website/src/app.tsbuildinfo', 'website/assets/raw-previews/hero.png', 'website/public/downloads/brr-source.tar.gz', 'scripts/deployment.tar.gz', 'e2e/test-results/screenshot.png', 'e2e/screenshots/manual.png', '.pnpm-store/local.sqlite', 'evidence/qa/screenshot.png']) {
       assert.ok(!selected.includes(excluded), `${excluded} must be excluded`)
     }
     for (const excluded of files.filter(file => /\.env$|account\.env|evidence|state\.json|^AGENTS|^CONTEXT|docs\/native-qa|\.openai|\.sites-runtime|tsbuildinfo|raw-previews|\.cache|\.tools|node_modules|target|bazel-out|\.git|\.pem$|binaries/.test(file))) {

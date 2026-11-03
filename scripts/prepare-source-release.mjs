@@ -9,7 +9,7 @@ const rootFiles = new Set([
   'playwright.config.ts', 'tsconfig.json', 'vite.config.ts', 'README.md', 'PRODUCT.md',
   'DESIGN.md', 'LICENSE', 'NOTICE', 'CONTRIBUTING.md', 'GOVERNANCE.md',
 ])
-const includedTrees = new Set(['src', 'src-tauri', 'runtime', 'vendor', 'scripts', 'docs', 'website', 'e2e'])
+const includedTrees = new Set(['src', 'src-tauri', 'runtime', 'vendor', 'scripts', 'docs', 'website', 'e2e', 'public', 'fixtures'])
 const excludedDirectoryNames = new Set([
   '.git', '.cache', '.openai', '.sites-runtime', '.tools', 'node_modules', 'target', 'dist', 'gen', 'bazel-out',
   'bazel-bin', 'bazel-testlogs', 'bazel-src', 'test-results', 'playwright-report',

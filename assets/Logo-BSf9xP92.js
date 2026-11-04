@@ -1,0 +1,1 @@
+import{j as r}from"./client-CL-IArO7.js";function l({className:a,animated:s=!0}){const o=["brr-logo",a].filter(Boolean).join(" ");return r.jsxs("span",{className:o,role:"img","aria-label":"Brr","data-animated":s,children:[r.jsx("span",{className:"brr-logo-word",children:"Brr"}),r.jsx("span",{className:"brr-logo-dot","aria-hidden":"true"})]})}export{l as L};

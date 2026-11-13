@@ -5,11 +5,11 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const rootFiles = new Set([
-  '.gitignore', '.gitmodules', '.env.example', 'components.json', 'index.html', 'package.json', 'pnpm-lock.yaml', 'rust-toolchain.toml',
+  '.gitignore', '.gitmodules', '.env.example', 'components.json', 'index.html', 'package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'rust-toolchain.toml',
   'playwright.config.ts', 'tsconfig.json', 'vite.config.ts', 'README.md', 'PRODUCT.md',
   'DESIGN.md', 'LICENSE', 'NOTICE', 'CONTRIBUTING.md', 'GOVERNANCE.md',
 ])
-const includedTrees = new Set(['src', 'src-tauri', 'runtime', 'vendor', 'scripts', 'docs', 'website', 'e2e', 'public', 'fixtures', 'crates', 'packaging'])
+const includedTrees = new Set(['src', 'src-tauri', 'runtime', 'vendor', 'scripts', 'docs', 'website', 'e2e', 'public', 'fixtures', 'crates', 'packaging', 'apps', 'packages'])
 const publicDocs = new Set(['docs/open-source-release.md', 'docs/fleet-setup.md', 'docs/adr'])
 const excludedDirectoryNames = new Set([
   '.git', '.cache', '.openai', '.sites-runtime', '.tools', 'node_modules', 'target', 'dist', 'gen', 'bazel-out',
@@ -35,10 +35,10 @@ function isExcluded(relativePath, entry) {
   if (/^\.env(?:\..*)?$/.test(name) && name !== '.env.example') return true
   if (/\.env$/i.test(name)) return true
   if (!relativePath.startsWith('runtime/codex/') && /^(?:account(?:\..*)?\.json|auth\.json|credentials\.json)$/i.test(name)) return true
-  const localKeyScope = !relativePath.includes('/') || /^(?:src-tauri|crates|packaging)\//.test(relativePath)
+  const localKeyScope = !relativePath.includes('/') || /^(?:src-tauri|crates|packaging|apps|packages)\//.test(relativePath)
   if (localKeyScope && /\.(?:pem|p12|key|mobileprovision)$/i.test(name)) return true
   if (/^(?:crates|packaging)\//.test(relativePath) && /\.(?:db|sqlite3?)(?:-(?:wal|shm))?$/i.test(name)) return true
-  if (/\.(?:app|deb|dmg|exe|dll|so|dylib|a|o|rlib)$/i.test(name)) return true
+  if (/\.(?:app|deb|dmg|exe|dll|so|dylib|a|o|rlib|ipa|xcarchive)$/i.test(name)) return true
   if (/\.tsbuildinfo$/i.test(name)) return true
   if (/^(?:preview|raw-preview|generated-preview)\.(?:png|jpe?g|webp|gif|avif|svg)$/i.test(name)) return true
   if (!relativePath.startsWith('runtime/codex/') && /\.(?:tar(?:\.(?:gz|bz2|xz))?|tgz|zip)$/i.test(name)) return true

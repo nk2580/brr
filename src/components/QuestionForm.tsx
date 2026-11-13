@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
-import { getQuestionStatus, questionAnswersEqual, type Question, type QuestionAnswers, type QuestionRequest } from '../lib/questions'
+import { getQuestionStatus, questionAnswersEqual, type QuestionAnswers, type QuestionRequest } from '../lib/questions'
 import { Button } from './ui/button'
 import './QuestionForm.css'
 
@@ -8,11 +8,12 @@ type QuestionFormProps = {
   onSaveDraft: (answers: QuestionAnswers) => Promise<unknown> | void
   onAnswer: (answers: QuestionAnswers) => Promise<unknown>
   onDismiss: () => Promise<unknown>
+  responseAvailable?: boolean
   origin?: string
   trailingControl?: ReactNode
 }
 
-export function QuestionForm({ request, onSaveDraft, onAnswer, onDismiss, origin, trailingControl }: QuestionFormProps) {
+export function QuestionForm({ request, onSaveDraft, onAnswer, onDismiss, responseAvailable = true, origin, trailingControl }: QuestionFormProps) {
   const [answers, setAnswers] = useState<QuestionAnswers>(() => ({ ...(request.resolution === 'pending' ? request.draft : request.answers ?? request.draft) }))
   const [step, setStep] = useState(0)
   const [busy, setBusy] = useState(false)
@@ -107,7 +108,7 @@ export function QuestionForm({ request, onSaveDraft, onAnswer, onDismiss, origin
   const isCurrentComplete = Boolean(currentValue.trim())
 
   const submit = async () => {
-    if (!isComplete) return
+    if (!responseAvailable || !isComplete) return
     const cleanAnswers = Object.fromEntries(request.questions.map(question => [question.id, [(answers[question.id] ?? [])[0].trim()]]))
     setBusy(true)
     setError('')
@@ -135,6 +136,7 @@ export function QuestionForm({ request, onSaveDraft, onAnswer, onDismiss, origin
   const goBack = () => setStep(current => Math.max(0, current - 1))
 
   const dismiss = async () => {
+    if (!responseAvailable) return
     setBusy(true)
     setError('')
     try { await save(latest.current); await onDismiss() }
@@ -172,10 +174,10 @@ export function QuestionForm({ request, onSaveDraft, onAnswer, onDismiss, origin
       </label>
       {error && <div className="question-error"><p role="alert">{error}</p><Button type="button" variant="ghost" size="sm" onClick={() => setError('')}>Clear error</Button></div>}
       <footer className="question-composer-footer">
-        <Button type="button" variant="ghost" size="sm" disabled={busy} onClick={() => void dismiss()}>Dismiss</Button>
+        <Button type="button" variant="ghost" size="sm" disabled={!responseAvailable || busy} onClick={() => void dismiss()}>Dismiss</Button>
         <div className="question-composer-navigation">
           <Button type="button" variant="ghost" size="sm" disabled={busy || step === 0} onClick={goBack}>Back</Button>
-          <Button type="submit" size="sm" disabled={busy || (step === request.questions.length - 1 ? !isComplete : !isCurrentComplete)}>{busy ? step === request.questions.length - 1 ? 'Submitting…' : 'Saving…' : step === request.questions.length - 1 ? error ? 'Retry answer' : 'Submit answers' : 'Next'}</Button>
+          <Button type="submit" size="sm" disabled={busy || (step === request.questions.length - 1 && !responseAvailable) || (step === request.questions.length - 1 ? !isComplete : !isCurrentComplete)}>{busy ? step === request.questions.length - 1 ? 'Submitting…' : 'Saving…' : step === request.questions.length - 1 ? error ? 'Retry answer' : 'Submit answers' : 'Next'}</Button>
           {trailingControl}
         </div>
       </footer>

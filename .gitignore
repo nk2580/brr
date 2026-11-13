@@ -39,3 +39,13 @@ website/public/downloads/
 
 crates/target/
 __pycache__/
+
+apps/mobile/src-tauri/gen/
+apps/mobile/src-tauri/target/
+apps/mobile/src-tauri/.env*
+/apps/mobile/**/*.pem
+/apps/mobile/**/*.p12
+/apps/mobile/**/*.key
+/apps/mobile/**/*.mobileprovision
+/apps/mobile/**/*.ipa
+/apps/mobile/**/*.xcarchive/

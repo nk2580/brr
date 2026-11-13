@@ -1,0 +1,30 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Brr Mobile",
+  "version": "0.1.0",
+  "identifier": "dev.brr.mobile",
+  "build": {
+    "beforeDevCommand": "pnpm dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "pnpm build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [{
+      "title": "Brr Mobile",
+      "width": 390,
+      "height": 844,
+      "minWidth": 320,
+      "minHeight": 568,
+      "resizable": true,
+      "transparent": true
+    }],
+    "security": { "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost https:; img-src 'self' asset: data:; style-src 'self' 'unsafe-inline'; script-src 'self'" }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app"],
+    "icon": ["icons/icon.png"],
+    "iOS": { "minimumSystemVersion": "17.0", "infoPlist": "Info.ios.plist", "template": "src-tauri/ios/project.yml" }
+  }
+}

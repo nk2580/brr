@@ -32,6 +32,33 @@ test('fleet source release includes the node and Linux packaging', async () => {
   }
 })
 
+test('source release contains the iPhone build inputs and excludes local signing files', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'brr-mobile-release-'))
+  const required = [
+    'pnpm-workspace.yaml', 'apps/mobile/package.json', 'apps/mobile/src/App.tsx',
+    'apps/mobile/src-tauri/Cargo.lock', 'apps/mobile/src-tauri/ios/project.yml',
+    'apps/mobile/src-tauri/ios/Simulator.entitlements', 'packages/remote-client/src/index.ts',
+  ]
+  const excluded = [
+    'apps/mobile/dist/index.html', 'apps/mobile/src-tauri/gen/apple/project.pbxproj',
+    'apps/mobile/src-tauri/target/build.log', 'apps/mobile/signing.p12',
+    'apps/mobile/src-tauri/profile.mobileprovision', 'packages/remote-client/private.env',
+    'apps/mobile/Brr.ipa', 'apps/mobile/Brr.xcarchive/Info.plist',
+  ]
+  try {
+    for (const file of [...required, ...excluded]) {
+      const target = path.join(root, file)
+      await mkdir(path.dirname(target), { recursive: true })
+      await writeFile(target, 'fixture')
+    }
+    const selected = await selectReleaseFiles(root)
+    for (const file of required) assert.ok(selected.includes(file), `release must include ${file}`)
+    for (const file of excluded) assert.ok(!selected.includes(file), `release must exclude ${file}`)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('selects releasable source and attribution while excluding local and generated material', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'brr-release-fixture-'))
   try {

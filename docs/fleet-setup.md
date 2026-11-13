@@ -72,3 +72,32 @@ and complete the ChatGPT device-code flow. Check enrollment with
 Use matching node releases before sharing saved attachments. Accepted
 attachments sync with published conversation history. Workspaces, tasks,
 schedules, and active execution stay on their owner.
+
+## Build Brr Mobile
+
+On a Mac with Xcode and XcodeGen, install the dependencies and initialize the
+iOS project:
+
+```sh
+pnpm install --frozen-lockfile
+rustup target add aarch64-apple-ios aarch64-apple-ios-sim
+pnpm --filter @brr/mobile tauri ios init --ci --skip-targets-install
+```
+
+For an Apple silicon simulator, install the iOS simulator runtime in Xcode and
+run `pnpm --filter @brr/mobile ios:sim`. The simulator build uses local signing
+for Keychain access. For an iPhone running iOS 17 or later, select your development
+team in the generated Xcode project, connect and trust the iPhone, enable
+Developer Mode, then run the app on that device. Build the frontend with `pnpm mobile:build`
+and select the release build configuration when running directly from Xcode
+so the app uses the bundled frontend.
+
+## Pair Brr Mobile
+
+On the primary, run `brrctl pair --name "My iPhone"`. Open Brr Mobile and paste the
+single-use invitation, or scan its QR code if you have displayed it as one.
+The iPhone must be able to reach the primary over your LAN or private VPN.
+
+Open **Fleet** to see the primary and workers. When starting new work, choose
+the execution node. Existing work stays on its original owner. You can read
+cached conversations and save drafts while offline.

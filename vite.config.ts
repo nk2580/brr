@@ -8,5 +8,5 @@ export default defineConfig({
   resolve: { alias: { '@': fileURLToPath(new URL('./src', import.meta.url)) } },
   server: { port: 1420, strictPort: true, watch: { ignored: ['**/src-tauri/**', '**/runtime/**', '**/.cache/**', '**/.tools/**'] } },
   clearScreen: false,
-  test: { environment: 'jsdom', setupFiles: ['./src/test/setup.ts'], include: ['src/**/*.test.{ts,tsx}'] },
+  test: { environment: 'jsdom', setupFiles: ['./src/test/setup.ts'], include: ['src/**/*.test.{ts,tsx}', 'packages/remote-client/src/**/*.test.ts'] },
 })

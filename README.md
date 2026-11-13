@@ -69,6 +69,12 @@ Build the Debian package from a recursive source checkout with
 to enroll a node and sign in to ChatGPT. See the
 [Linux release guide](packaging/linux/README.md) for build and verification details.
 
+## Connect from an iPhone
+
+Brr Mobile controls sessions and agents on their original fleet nodes.
+Follow the [iPhone build and pairing instructions](docs/fleet-setup.md#build-brr-mobile)
+to run the app on iOS 17 or later.
+
 ## Work with Brr
 
 Open **Agents** to create a persistent helper through an interview. Review its

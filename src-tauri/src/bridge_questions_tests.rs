@@ -554,7 +554,7 @@ async fn owned_runtime_questions_roundtrip_in_both_collaboration_modes() {
     }
     std::fs::copy(auth, dir.path().join("auth.json")).unwrap();
     let engine = Engine::connect(
-        crate::runtime_command(dir.path()).unwrap(),
+        crate::runtime_command(dir.path(), dir.path()).unwrap(),
         Arc::new(|_| {}),
     )
     .await

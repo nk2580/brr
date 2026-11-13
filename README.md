@@ -61,6 +61,14 @@ export PATH="$PWD/.tools/node_modules/.bin:$PATH"
 pnpm install
 ```
 
+## Run a Linux fleet node
+
+Brr Node is a headless service for Debian 12 and Ubuntu 24.04 on x86-64.
+Build the Debian package from a recursive source checkout with
+`packaging/linux/build-release.sh`, then follow the [fleet setup guide](docs/fleet-setup.md)
+to enroll a node and sign in to ChatGPT. See the
+[Linux release guide](packaging/linux/README.md) for build and verification details.
+
 ## Work with Brr
 
 Open **Agents** to create a persistent helper through an interview. Review its

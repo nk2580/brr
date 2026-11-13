@@ -11,6 +11,8 @@ Persistent Agents are implemented by the app-owned `runtime/brr/agents` crate an
 
 The Brr entrypoint is `codex/codex-rs/app-server/src/brr_main.rs`. It reuses the fork's agent loop, tool execution, sandboxing, conversation storage, streaming protocol and OAuth implementation. Brr's runtime policy is in `codex/brr/policy`; the fork enforces it for login and before model input. Changes to upstream files should remain narrow and be documented here to make upstream merges reviewable.
 
+On Linux, the Brr entrypoint recognizes a sibling `codex-linux-sandbox` symlink only when it resolves to the same executable as `brr-runtime`. This package-owned alias is passed through the runtime helper paths for Bubblewrap versions before 0.9, which cannot set the inner process `argv[0]`. The runtime does not grant access to the service data root to make the temporary arg0 alias visible.
+
 Brr restrictions are compiled through the `brr-runtime` Cargo feature. The Brr binary requires that feature, so it cannot be built without its authentication policy. Upstream binaries and provider-specific upstream tests retain their original behavior when the feature is absent. Brr's verification gate runs its own policy tests and the actual runtime smoke test with the feature enabled.
 
 Maintained source changes:
@@ -59,9 +61,11 @@ Conversation-first chat isolates Brr-managed originals from host state. Under th
 is applied by `turn_processor.rs` before model input. It preserves the managed
 profile, workspace permissions and network policy; denies the app-owned chat
 registry/blob subtree; and grants read-only access to the current runtime thread’s
-staged originals. Reapplying the profile strips the source thread’s grants on a
-history fork. Unmanaged profiles are rejected. The host controls staging and fork
-configuration; the renderer supplies opaque attachment IDs only.
+staged originals. The effective local environment CWD is used for the workspace
+grant, with the saved legacy CWD as fallback when no local environment is selected.
+Reapplying the profile strips the source thread’s grants on a history fork.
+Unmanaged profiles are rejected. The host controls staging and fork configuration;
+the renderer supplies opaque attachment IDs only.
 
 `runtime/brr/chat-permission-tests` compiles the actual permission helper and
 upstream Seatbelt generator. Its two matcher tests and macOS process test verify
@@ -71,8 +75,11 @@ outer sandbox can reject nested sandbox application before the command starts.
 See that crate's README and verification record for the offline command and
 the tested macOS arm64 result. This is separate from packaged UI/provider QA.
 
-This release targets packaged macOS verification. Other platforms are unverified.
-Linux’s current Bubblewrap mount ordering does not reopen a read-only child below
-a denied parent; attachment access on Linux requires that adapter follow-up before
-being claimed supported. No cross-platform enforcement claim follows from the
-pure permission matcher tests.
+The fleet runtime scopes managed turns to the service data boundary. The
+Linux Bubblewrap adapter orders nested deny, read, and write mounts by path
+depth. It prepares permitted descendant targets before remounting a denied
+parent, then reopens exact children directly from their original paths. The
+Linux package verifier checks that the selected attachment can be read, the
+workspace stays writable, and other service files stay hidden. On macOS the
+Seatbelt adapter adds a service-root deny and explicit workspace and attachment
+carveouts.

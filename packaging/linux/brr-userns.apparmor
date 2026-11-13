@@ -1,0 +1,12 @@
+# Ubuntu 24.04 requires a named exception for Chromium's own user namespace sandbox.
+# This does not disable Chromium's sandbox or change a system-wide sysctl.
+abi <abi/4.0>,
+include <tunables/global>
+
+profile brr-browser /usr/lib/brr/browser/chrome-headless-shell flags=(unconfined) {
+  userns,
+}
+
+profile brr-runtime /usr/lib/brr/brr-runtime flags=(unconfined) {
+  userns,
+}

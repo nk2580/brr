@@ -13,6 +13,8 @@
     "test:watch": "vitest",
     "test:e2e": "playwright test",
     "tauri": "tauri",
+    "node:build": "node scripts/build-node.mjs",
+    "fleet:test": "cargo test --locked --manifest-path crates/Cargo.toml --workspace --all-features",
     "runtime:build": "node scripts/build-runtime.mjs",
     "runtime:test": "cargo +stable test --manifest-path runtime/codex/brr/policy/Cargo.toml",
     "runtime:extensions-test": "cargo +stable test --manifest-path runtime/brr/extension-tests/Cargo.toml",
@@ -24,7 +26,7 @@
     "agents:test": "cargo test --manifest-path runtime/brr/agents/Cargo.toml --target-dir src-tauri/target",
     "agents:smoke": "cargo test --manifest-path src-tauri/Cargo.toml owned_runtime_accepts_agent_tools -- --ignored",
     "questions:smoke": "cargo test --manifest-path src-tauri/Cargo.toml owned_runtime_questions_roundtrip_in_both_collaboration_modes -- --ignored --nocapture",
-    "test:build-tools": "node --test scripts/runtime-artifacts.test.mjs",
+    "test:build-tools": "node --test scripts/runtime-artifacts.test.mjs scripts/prepare-source-release.test.mjs",
     "desktop:dev": "pnpm runtime:build && pnpm tauri dev",
     "desktop:build": "pnpm runtime:build --release && pnpm tauri build --config src-tauri/tauri.bundle.conf.json",
     "check": "pnpm test && pnpm build"

@@ -6,6 +6,32 @@ import path from 'node:path'
 import test from 'node:test'
 import { createSourceArchive, selectReleaseFiles } from './prepare-source-release.mjs'
 
+test('fleet source release includes the node and Linux packaging', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'brr-fleet-release-'))
+  const required = [
+    'crates/Cargo.toml', 'crates/Cargo.lock', 'crates/brr-node/src/bin/brrd.rs',
+    'scripts/build-node.mjs', 'packaging/linux/brrd.service',
+    'packaging/browser-artifacts.json', 'docs/fleet-setup.md',
+  ]
+  const excluded = [
+    'crates/target/debug/brrd', 'packaging/private.env', 'packaging/brr-node.deb',
+    'crates/brr-node/local/node.key', 'packaging/local/tls.pem',
+    'crates/brr-node/local/auth.sqlite', 'packaging/local/state.sqlite3-wal',
+  ]
+  try {
+    for (const file of [...required, ...excluded]) {
+      const target = path.join(root, file)
+      await mkdir(path.dirname(target), { recursive: true })
+      await writeFile(target, 'fixture')
+    }
+    const selected = await selectReleaseFiles(root)
+    for (const file of required) assert.ok(selected.includes(file), `release must include ${file}`)
+    for (const file of excluded) assert.ok(!selected.includes(file), `release must exclude ${file}`)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('selects releasable source and attribution while excluding local and generated material', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'brr-release-fixture-'))
   try {

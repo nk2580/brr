@@ -1325,6 +1325,152 @@ async fn sandbox_blocks_explicit_split_policy_carveouts_under_bwrap() {
 }
 
 #[tokio::test]
+async fn readable_carveout_below_denied_service_root_is_reopened_without_exposing_siblings() {
+    let temp = tempfile::tempdir().expect("create service fixture");
+    let service_root = temp.path().join("brr-data");
+    let workspace = service_root.join("engine/session-workspaces/thread");
+    let selected = service_root.join("engine/agents/chat/runtime/thread");
+    let nested_private = selected.join("private");
+    let private = service_root.join("node/auth.sqlite");
+    std::fs::create_dir_all(&workspace).expect("create workspace");
+    std::fs::create_dir_all(&selected).expect("create selected staging");
+    std::fs::create_dir_all(&nested_private).expect("create nested private data");
+    std::fs::create_dir_all(private.parent().unwrap()).expect("create private store dir");
+    std::fs::write(selected.join("selected.txt"), "selected original\n").unwrap();
+    let nested_secret = nested_private.join("nested-secret.txt");
+    std::fs::write(&nested_secret, "nested private\n").unwrap();
+    std::fs::write(&private, "TLS secret\n").unwrap();
+
+    let sandbox_helper_dir = codex_linux_sandbox_exe()
+        .parent()
+        .expect("sandbox helper should have a parent")
+        .to_path_buf();
+    let file_system_sandbox_policy = FileSystemSandboxPolicy::restricted(vec![
+        FileSystemSandboxEntry::new(
+            FileSystemPath::Special {
+                value: FileSystemSpecialPath::Minimal,
+            },
+            FileSystemAccessMode::Read,
+        ),
+        FileSystemSandboxEntry::new(
+            FileSystemPath::from(AbsolutePathBuf::try_from(sandbox_helper_dir.as_path()).unwrap()),
+            FileSystemAccessMode::Read,
+        ),
+        FileSystemSandboxEntry::new(
+            FileSystemPath::from(AbsolutePathBuf::try_from(service_root.as_path()).unwrap()),
+            FileSystemAccessMode::Deny,
+        ),
+        FileSystemSandboxEntry::new(
+            FileSystemPath::from(AbsolutePathBuf::try_from(selected.as_path()).unwrap()),
+            FileSystemAccessMode::Read,
+        ),
+        FileSystemSandboxEntry::new(
+            FileSystemPath::from(AbsolutePathBuf::try_from(nested_private.as_path()).unwrap()),
+            FileSystemAccessMode::Deny,
+        ),
+        FileSystemSandboxEntry::new(
+            FileSystemPath::from(AbsolutePathBuf::try_from(workspace.as_path()).unwrap()),
+            FileSystemAccessMode::Write,
+        ),
+    ]);
+    let profile = PermissionProfile::from_runtime_permissions(
+        &file_system_sandbox_policy,
+        NetworkSandboxPolicy::Restricted,
+    );
+    let cwd = AbsolutePathBuf::try_from(workspace.as_path()).unwrap();
+    let env = create_env_from_core_vars();
+
+    let selected_output = run_cmd_result_with_permission_profile_for_cwd(
+        &["cat", selected.join("selected.txt").to_str().unwrap()],
+        cwd.clone(),
+        profile.clone(),
+        env.clone(),
+        LONG_TIMEOUT_MS,
+        /*use_legacy_landlock*/ false,
+    )
+    .await
+    .expect("sandbox should execute selected read");
+    assert_eq!(
+        selected_output.exit_code, 0,
+        "{}",
+        selected_output.stderr.text
+    );
+    assert_eq!(selected_output.stdout.text, "selected original\n");
+
+    let selected_write_output = run_cmd_result_with_permission_profile_for_cwd(
+        &[
+            "sh",
+            "-c",
+            &format!(
+                "printf modified > {}",
+                selected.join("selected.txt").display()
+            ),
+        ],
+        cwd.clone(),
+        profile.clone(),
+        env.clone(),
+        LONG_TIMEOUT_MS,
+        /*use_legacy_landlock*/ false,
+    )
+    .await
+    .expect("sandbox should execute selected-file write probe");
+    assert_ne!(
+        selected_write_output.exit_code, 0,
+        "selected original was writable"
+    );
+    assert_eq!(
+        std::fs::read_to_string(selected.join("selected.txt")).unwrap(),
+        "selected original\n"
+    );
+
+    let nested_private_output = run_cmd_result_with_permission_profile_for_cwd(
+        &["cat", nested_secret.to_str().unwrap()],
+        cwd.clone(),
+        profile.clone(),
+        env.clone(),
+        LONG_TIMEOUT_MS,
+        /*use_legacy_landlock*/ false,
+    )
+    .await
+    .expect("sandbox should execute nested denied-read probe");
+    assert_ne!(
+        nested_private_output.exit_code, 0,
+        "nested denied file under selected originals was readable"
+    );
+
+    let write_output = run_cmd_result_with_permission_profile_for_cwd(
+        &["sh", "-c", "printf workspace > workspace-write.txt"],
+        cwd.clone(),
+        profile.clone(),
+        env.clone(),
+        LONG_TIMEOUT_MS,
+        /*use_legacy_landlock*/ false,
+    )
+    .await
+    .expect("sandbox should execute workspace write");
+    assert_eq!(write_output.exit_code, 0, "{}", write_output.stderr.text);
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("workspace-write.txt")).unwrap(),
+        "workspace"
+    );
+
+    let private_output = run_cmd_result_with_permission_profile_for_cwd(
+        &["cat", private.to_str().unwrap()],
+        cwd,
+        profile,
+        env,
+        LONG_TIMEOUT_MS,
+        /*use_legacy_landlock*/ false,
+    )
+    .await
+    .expect("sandbox should execute denied-read probe");
+    assert_ne!(
+        private_output.exit_code, 0,
+        "private auth store was readable"
+    );
+}
+
+#[tokio::test]
 async fn sandbox_starts_with_denied_tmp_without_exposing_registry() {
     if should_skip_bwrap_tests().await {
         eprintln!("skipping bwrap test: bwrap sandbox prerequisites are unavailable");

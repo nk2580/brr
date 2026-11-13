@@ -1,0 +1,15 @@
+[Unit]
+Description=Brr personal fleet execution service
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/lib/brr/brrd
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=30
+UMask=0077
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

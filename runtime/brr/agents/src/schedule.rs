@@ -59,6 +59,7 @@ impl AgentStore {
     pub async fn create_workflow(&self, input: WorkflowInput) -> Result<Workflow, String> {
         let mut tx = self.pool.begin().await.map_err(err)?;
         let workflow = create_workflow_tx(&mut tx, input).await?;
+        self.before_shared_commit(&mut tx).await?;
         tx.commit().await.map_err(err)?;
         Ok(workflow)
     }
@@ -143,6 +144,7 @@ impl AgentStore {
         sqlx::query("INSERT INTO events(kind,entity_id,payload,created_at) VALUES('task.delegation_scheduled',?,?,?)")
             .bind(proposal_id).bind(serde_json::to_string(&payload).map_err(err)?).bind(now())
             .execute(&mut *tx).await.map_err(err)?;
+        self.before_shared_commit(&mut tx).await?;
         tx.commit().await.map_err(err)?;
         Ok(workflow)
     }

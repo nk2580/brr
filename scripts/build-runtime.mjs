@@ -11,7 +11,7 @@ if (!target) throw new Error('Could not determine the Rust target')
 console.log(`Preparing checksum-verified V8 artifacts for ${target}`)
 const artifacts = await prepareV8Artifacts({root, target})
 const targetDir = path.join(root, 'runtime/target')
-const args = ['+stable', 'build', '--manifest-path', path.join(root, 'runtime/codex/codex-rs/Cargo.toml'), '-p', 'codex-app-server', '--bin', 'brr-runtime', '-p', 'codex-code-mode-host', '--bin', 'codex-code-mode-host', '--features', 'codex-app-server/brr-runtime', '--target-dir', targetDir, '--target', target]
+const args = [`+${process.env.BRR_RUST_TOOLCHAIN || 'stable'}`, 'build', '--manifest-path', path.join(root, 'runtime/codex/codex-rs/Cargo.toml'), '-p', 'codex-app-server', '--bin', 'brr-runtime', '-p', 'codex-code-mode-host', '--bin', 'codex-code-mode-host', '--features', 'codex-app-server/brr-runtime', '--target-dir', targetDir, '--target', target]
 if (release) args.push('--release')
 const build = spawnSync('cargo', args, {cwd:root, stdio:'inherit', env:{...process.env, ...artifacts, CARGO_INCREMENTAL:'0', CARGO_PROFILE_DEV_DEBUG:'0', CARGO_NET_GIT_FETCH_WITH_CLI:'true'}})
 if (build.status !== 0) process.exit(build.status ?? 1)

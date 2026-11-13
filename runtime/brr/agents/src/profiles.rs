@@ -115,8 +115,36 @@ impl AgentStore {
             .bind(&draft.id).bind(&draft.thread_id).bind(&draft.agent_id).bind(serde_json::to_string(&draft.candidate).map_err(|e|e.to_string())?).bind(&draft.hash).bind(draft.base_revision).bind(now())
             .execute(&mut *tx).await.map_err(|e|e.to_string())?;
         event_tx(&mut tx, "profile.proposed", &draft.id, &draft).await?;
+        self.before_shared_commit(&mut tx).await?;
         tx.commit().await.map_err(|e| e.to_string())?;
         Ok(draft)
+    }
+
+    /// Reject a proposed profile by its exact candidate hash under the shared
+    /// authority transaction. The host cannot update profile_drafts directly.
+    pub async fn reject_profile(&self, draft_id: &str, hash: &str) -> Result<ProfileDraft, String> {
+        let mut tx = self.pool.begin().await.map_err(|e| e.to_string())?;
+        let draft = draft_by_id(&mut tx, draft_id).await?;
+        if draft.hash != hash || digest(&draft.candidate)? != hash {
+            return Err("profile draft changed since review".into());
+        }
+        if draft.status != "proposed" {
+            return Err("profile draft is not reviewable".into());
+        }
+        sqlx::query("UPDATE profile_drafts SET status='rejected' WHERE id=? AND hash=? AND status='proposed'")
+            .bind(draft_id)
+            .bind(hash)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?;
+        let rejected = ProfileDraft {
+            status: "rejected".into(),
+            ..draft
+        };
+        event_tx(&mut tx, "profile.rejected", draft_id, &rejected).await?;
+        self.before_shared_commit(&mut tx).await?;
+        tx.commit().await.map_err(|e| e.to_string())?;
+        Ok(rejected)
     }
 
     pub async fn approve_profile(
@@ -168,6 +196,7 @@ impl AgentStore {
             .await
             .map_err(|e| e.to_string())?;
         event_tx(&mut tx, "profile.approved", draft_id, &approved).await?;
+        self.before_shared_commit(&mut tx).await?;
         tx.commit().await.map_err(|e| e.to_string())?;
         Ok(approved)
     }
@@ -221,6 +250,7 @@ impl AgentStore {
                 .execute(&mut *tx)
                 .await
                 .map_err(|e| e.to_string())?;
+            self.before_shared_commit(&mut tx).await?;
             tx.commit().await.map_err(|e| e.to_string())?;
             self.materialize(&profile)?;
             return Ok(profile);
@@ -273,6 +303,7 @@ impl AgentStore {
             .await
             .map_err(|e| e.to_string())?;
         event_tx(&mut tx, "profile.applied", &profile.id, &profile).await?;
+        self.before_shared_commit(&mut tx).await?;
         tx.commit().await.map_err(|e| e.to_string())?;
         self.materialize(&profile)?;
         Ok(profile)

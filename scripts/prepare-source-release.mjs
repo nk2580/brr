@@ -9,10 +9,11 @@ const rootFiles = new Set([
   'playwright.config.ts', 'tsconfig.json', 'vite.config.ts', 'README.md', 'PRODUCT.md',
   'DESIGN.md', 'LICENSE', 'NOTICE', 'CONTRIBUTING.md', 'GOVERNANCE.md',
 ])
-const includedTrees = new Set(['src', 'src-tauri', 'runtime', 'vendor', 'scripts', 'docs', 'website', 'e2e', 'public', 'fixtures'])
+const includedTrees = new Set(['src', 'src-tauri', 'runtime', 'vendor', 'scripts', 'docs', 'website', 'e2e', 'public', 'fixtures', 'crates', 'packaging'])
+const publicDocs = new Set(['docs/open-source-release.md', 'docs/fleet-setup.md', 'docs/adr'])
 const excludedDirectoryNames = new Set([
   '.git', '.cache', '.openai', '.sites-runtime', '.tools', 'node_modules', 'target', 'dist', 'gen', 'bazel-out',
-  'bazel-bin', 'bazel-testlogs', 'bazel-src', 'test-results', 'playwright-report',
+  'bazel-bin', 'bazel-testlogs', 'bazel-src', 'test-results', 'playwright-report', '__pycache__',
   'raw-previews', 'generated-previews',
 ])
 
@@ -24,7 +25,7 @@ function isExcluded(relativePath, entry) {
   if (relativePath === 'website/public/generated' || relativePath.startsWith('website/public/generated/')) return true
   if (relativePath === 'website/public/downloads' || relativePath.startsWith('website/public/downloads/')) return true
   if (relativePath.startsWith('src-tauri/binaries/')) return true
-  if (relativePath.startsWith('docs/') && relativePath !== 'docs/open-source-release.md' && relativePath !== 'docs/adr' && !relativePath.startsWith('docs/adr/')) return true
+  if (relativePath.startsWith('docs/') && !publicDocs.has(relativePath) && !relativePath.startsWith('docs/adr/')) return true
   if (relativePath.startsWith('e2e/')) {
     if (segments.slice(1).some(segment => ['screenshots', 'results', 'videos', 'traces'].includes(segment))) return true
     if (/\.(?:png|jpe?g|webp|gif|avif|mp4|webm|zip)$/i.test(segments.at(-1) ?? '')) return true
@@ -32,10 +33,12 @@ function isExcluded(relativePath, entry) {
   if (entry.isSymbolicLink()) return true
   const name = segments.at(-1) ?? ''
   if (/^\.env(?:\..*)?$/.test(name) && name !== '.env.example') return true
-  if (/^account\.env$/i.test(name)) return true
+  if (/\.env$/i.test(name)) return true
   if (!relativePath.startsWith('runtime/codex/') && /^(?:account(?:\..*)?\.json|auth\.json|credentials\.json)$/i.test(name)) return true
-  if ((!relativePath.includes('/') || relativePath.startsWith('src-tauri/')) && /\.(?:pem|p12|key|mobileprovision)$/i.test(name)) return true
-  if (/\.(?:app|dmg|exe|dll|so|dylib|a|o|rlib)$/i.test(name)) return true
+  const localKeyScope = !relativePath.includes('/') || /^(?:src-tauri|crates|packaging)\//.test(relativePath)
+  if (localKeyScope && /\.(?:pem|p12|key|mobileprovision)$/i.test(name)) return true
+  if (/^(?:crates|packaging)\//.test(relativePath) && /\.(?:db|sqlite3?)(?:-(?:wal|shm))?$/i.test(name)) return true
+  if (/\.(?:app|deb|dmg|exe|dll|so|dylib|a|o|rlib)$/i.test(name)) return true
   if (/\.tsbuildinfo$/i.test(name)) return true
   if (/^(?:preview|raw-preview|generated-preview)\.(?:png|jpe?g|webp|gif|avif|svg)$/i.test(name)) return true
   if (!relativePath.startsWith('runtime/codex/') && /\.(?:tar(?:\.(?:gz|bz2|xz))?|tgz|zip)$/i.test(name)) return true

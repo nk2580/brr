@@ -211,6 +211,7 @@ impl AgentStore {
         let mut tx = self.pool.begin().await.map_err(err)?;
         insert_task(&mut tx, &task, None, None).await?;
         event(&mut tx, "task.created", &task.id, &task).await?;
+        self.before_shared_commit(&mut tx).await?;
         tx.commit().await.map_err(err)?;
         Ok(task)
     }
@@ -264,6 +265,7 @@ impl AgentStore {
         .execute(&mut *tx)
         .await
         .map_err(err)?;
+        self.before_shared_commit(&mut tx).await?;
         tx.commit().await.map_err(err)?;
         Ok(task)
     }
@@ -285,6 +287,7 @@ impl AgentStore {
         let mut tx = self.pool.begin().await.map_err(err)?;
         insert_task(&mut tx, &task, None, None).await?;
         event(&mut tx, "task.created", &task.id, &task).await?;
+        self.before_shared_commit(&mut tx).await?;
         tx.commit().await.map_err(err)?;
         Ok(task)
     }

@@ -1,0 +1,31 @@
+#!/bin/sh
+set -eu
+
+case "${1:-}" in
+    remove) ;;
+    *) exit 0 ;;
+esac
+
+ROOT=${DPKG_ROOT:-}
+OS_RELEASE="${ROOT}/etc/os-release"
+[ -r "$OS_RELEASE" ] || exit 0
+. "$OS_RELEASE"
+[ "${ID:-}" = ubuntu ] || exit 0
+
+PROFILE_LINK="${ROOT}/etc/apparmor.d/brr-node"
+PROFILE_TARGET='../../usr/share/brr/brr-userns.apparmor'
+
+# Only unload and unlink the exact symlink created by postinst. A regular file
+# or a different symlink at this path is administrator-owned and is preserved.
+if [ -L "$PROFILE_LINK" ] && [ "$(readlink "$PROFILE_LINK")" = "$PROFILE_TARGET" ]; then
+    if [ -e "${ROOT}/sys/kernel/security/apparmor/.access" ]; then
+        command -v apparmor_parser >/dev/null 2>&1 || {
+            echo "AppArmor is active but apparmor_parser is unavailable; refusing to leave Brr policy loaded" >&2
+            exit 1
+        }
+        apparmor_parser -R "$PROFILE_LINK"
+    fi
+    rm -- "$PROFILE_LINK"
+fi
+
+exit 0

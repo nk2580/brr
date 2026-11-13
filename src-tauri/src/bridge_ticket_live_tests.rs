@@ -36,7 +36,7 @@ async fn prepare_isolated_native_ticket_fixture() {
         .await
         .unwrap();
     let engine = Engine::connect_with_stores(
-        crate::runtime_command(&home).unwrap(),
+        crate::runtime_command(&home, &root).unwrap(),
         Arc::new(|_| {}),
         store.clone(),
         projects.clone(),
@@ -93,7 +93,7 @@ async fn owned_runtime_creates_ticket_and_runs_only_after_native_review() {
     let events = Arc::new(Mutex::new(Vec::<Value>::new()));
     let observed = events.clone();
     let engine = Engine::connect(
-        crate::runtime_command(directory.path()).unwrap(),
+        crate::runtime_command(directory.path(), directory.path()).unwrap(),
         Arc::new(move |event| observed.lock().unwrap().push(event)),
     )
     .await

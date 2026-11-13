@@ -1,0 +1,51 @@
+#!/bin/sh
+set -eu
+
+[ "${1:-}" = configure ] || exit 0
+
+ROOT=${DPKG_ROOT:-}
+OS_RELEASE="${ROOT}/etc/os-release"
+[ -r "$OS_RELEASE" ] || exit 0
+. "$OS_RELEASE"
+[ "${ID:-}" = ubuntu ] || exit 0
+
+PROFILE_DIR="${ROOT}/etc/apparmor.d"
+PROFILE_SOURCE="${ROOT}/usr/share/brr/brr-userns.apparmor"
+PROFILE_LINK="$PROFILE_DIR/brr-node"
+PROFILE_TARGET='../../usr/share/brr/brr-userns.apparmor'
+[ -f "$PROFILE_SOURCE" ] || {
+    echo "Brr AppArmor source profile is missing: $PROFILE_SOURCE" >&2
+    exit 1
+}
+if [ -L "$PROFILE_DIR" ]; then
+    echo "Refusing to install Brr policy through a symlinked AppArmor directory: $PROFILE_DIR" >&2
+    exit 1
+fi
+mkdir -p "$PROFILE_DIR"
+[ -d "$PROFILE_DIR" ] || {
+    echo "AppArmor profile path is not a directory: $PROFILE_DIR" >&2
+    exit 1
+}
+
+if [ -e "$PROFILE_LINK" ] || [ -L "$PROFILE_LINK" ]; then
+    if [ ! -L "$PROFILE_LINK" ] || [ "$(readlink "$PROFILE_LINK")" != "$PROFILE_TARGET" ]; then
+        echo "Refusing to replace an existing administrator AppArmor policy: $PROFILE_LINK" >&2
+        exit 1
+    fi
+else
+    ln -s "$PROFILE_TARGET" "$PROFILE_LINK"
+fi
+
+# The link is also the boot-visible policy source. Load it now when AppArmor is
+# active; on systems without an active securityfs, the normal boot loader can
+# load the installed link later.
+if [ -e "${ROOT}/sys/kernel/security/apparmor/.access" ]; then
+    command -v apparmor_parser >/dev/null 2>&1 || {
+        echo "AppArmor is active but apparmor_parser is unavailable" >&2
+        exit 1
+    }
+    apparmor_parser -r "$PROFILE_LINK"
+fi
+
+# Each owner explicitly enables the user service; installation never starts a root agent.
+exit 0

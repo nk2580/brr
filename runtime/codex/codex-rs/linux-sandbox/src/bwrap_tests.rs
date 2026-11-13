@@ -1209,6 +1209,21 @@ fn split_policy_reenables_writable_files_after_unreadable_parent() {
         .windows(4)
         .position(|window| window == ["--perms", "111", "--tmpfs", blocked_str.as_str()])
         .expect("blocked should be masked first");
+    let file_placeholder_index = args
+        .args
+        .windows(5)
+        .position(|window| {
+            window[0] == "--perms"
+                && window[1] == "0444"
+                && window[2] == "--file"
+                && window[4] == allowed_file_str
+        })
+        .expect("file target should exist before blocked parent remount");
+    let blocked_remount_index = args
+        .args
+        .windows(2)
+        .position(|window| window == ["--remount-ro", blocked_str.as_str()])
+        .expect("blocked parent should be remounted read-only");
     let allowed_bind_index = args
         .args
         .windows(3)
@@ -1223,8 +1238,10 @@ fn split_policy_reenables_writable_files_after_unreadable_parent() {
         .expect("allowed file should be rebound writable");
 
     assert!(
-        blocked_none_index < allowed_bind_index,
-        "expected unreadable parent mask before rebinding writable file child: {:#?}",
+        blocked_none_index < file_placeholder_index
+            && file_placeholder_index < blocked_remount_index
+            && blocked_remount_index < allowed_bind_index,
+        "expected file target creation before parent remount and writable child bind: {:#?}",
         args.args
     );
 }
@@ -1283,6 +1300,159 @@ fn split_policy_reenables_nested_writable_roots_after_unreadable_parent() {
         "expected unreadable parent mask before recreating and rebinding writable child: {:#?}",
         args.args
     );
+}
+
+#[test]
+fn split_policy_orders_nested_deny_read_deny_write_layers() {
+    let temp_dir = TempDir::new().expect("create service fixture");
+    let service = temp_dir.path().join("service");
+    let selected = service.join("selected");
+    let denied = selected.join("private");
+    let writable = denied.join("workspace");
+    std::fs::create_dir_all(&writable).expect("create nested workspace");
+    std::fs::write(selected.join("selected.txt"), "selected").unwrap();
+    std::fs::write(denied.join("secret.txt"), "secret").unwrap();
+
+    let service = AbsolutePathBuf::try_from(service.as_path()).unwrap();
+    let selected = AbsolutePathBuf::try_from(selected.as_path()).unwrap();
+    let denied = AbsolutePathBuf::try_from(denied.as_path()).unwrap();
+    let writable = AbsolutePathBuf::try_from(writable.as_path()).unwrap();
+    let service_path = path_to_string(service.as_path());
+    let selected_path = path_to_string(selected.as_path());
+    let denied_path = path_to_string(denied.as_path());
+    let writable_path = path_to_string(writable.as_path());
+    let policy = FileSystemSandboxPolicy::restricted(vec![
+        FileSystemSandboxEntry {
+            path: service.clone().into(),
+            access: FileSystemAccessMode::Deny,
+            missing_path_behavior: None,
+        },
+        FileSystemSandboxEntry {
+            path: selected.clone().into(),
+            access: FileSystemAccessMode::Read,
+            missing_path_behavior: None,
+        },
+        FileSystemSandboxEntry {
+            path: denied.clone().into(),
+            access: FileSystemAccessMode::Deny,
+            missing_path_behavior: None,
+        },
+        FileSystemSandboxEntry {
+            path: writable.clone().into(),
+            access: FileSystemAccessMode::Write,
+            missing_path_behavior: None,
+        },
+    ]);
+
+    let args = create_filesystem_args(&policy, temp_dir.path(), BwrapOptions::default())
+        .expect("create ordered filesystem layers")
+        .args;
+    let service_mask = args
+        .windows(4)
+        .position(|window| window == ["--perms", "111", "--tmpfs", service_path.as_str()])
+        .expect("service root should be denied before descendants are reopened");
+    let service_remount = args
+        .windows(2)
+        .position(|window| window == ["--remount-ro", service_path.as_str()])
+        .filter(|index| *index > service_mask)
+        .expect("service root should be remounted read-only");
+    let selected_reopen = args
+        .windows(3)
+        .position(|window| window == ["--ro-bind", selected_path.as_str(), selected_path.as_str()])
+        .filter(|index| *index > service_remount)
+        .expect("selected child should reopen directly from the original path");
+    let denied_mask = args
+        .windows(4)
+        .position(|window| window == ["--perms", "111", "--tmpfs", denied_path.as_str()])
+        .filter(|index| *index > selected_reopen)
+        .expect("nested deny should reapply after selected read");
+    let denied_remount = args
+        .windows(2)
+        .position(|window| window == ["--remount-ro", denied_path.as_str()])
+        .filter(|index| *index > denied_mask)
+        .expect("nested deny should be remounted read-only");
+    let writable_reopen = args
+        .windows(3)
+        .position(|window| window == ["--bind", writable_path.as_str(), writable_path.as_str()])
+        .filter(|index| *index > denied_remount)
+        .expect("deeper workspace should reopen after nested deny");
+
+    assert!(service_mask < service_remount);
+    assert!(service_remount < selected_reopen);
+    assert!(selected_reopen < denied_mask);
+    assert!(denied_mask < denied_remount);
+    assert!(denied_remount < writable_reopen);
+    assert!(
+        !args
+            .iter()
+            .any(|arg| arg == "/dev/shm/.codex-readable-overlays"),
+        "read roots must bind from their original source, not a staged alias"
+    );
+}
+
+#[test]
+fn broad_read_and_enclosing_write_do_not_hide_read_below_deeper_deny() {
+    let temp_dir = TempDir::new().expect("create service fixture");
+    let writable_root = temp_dir.path().join("workspace-root");
+    let service = writable_root.join("service");
+    let selected = service.join("selected");
+    std::fs::create_dir_all(&selected).expect("create selected child");
+    std::fs::write(selected.join("selected.txt"), "selected").unwrap();
+
+    let writable_root = AbsolutePathBuf::try_from(writable_root.as_path()).unwrap();
+    let service = AbsolutePathBuf::try_from(service.as_path()).unwrap();
+    let selected = AbsolutePathBuf::try_from(selected.as_path()).unwrap();
+    let writable_path = path_to_string(writable_root.as_path());
+    let service_path = path_to_string(service.as_path());
+    let selected_path = path_to_string(selected.as_path());
+    let policy = FileSystemSandboxPolicy::restricted(vec![
+        FileSystemSandboxEntry {
+            path: FileSystemPath::Special {
+                value: FileSystemSpecialPath::Root,
+            },
+            access: FileSystemAccessMode::Read,
+            missing_path_behavior: None,
+        },
+        FileSystemSandboxEntry {
+            path: writable_root.into(),
+            access: FileSystemAccessMode::Write,
+            missing_path_behavior: None,
+        },
+        FileSystemSandboxEntry {
+            path: service.clone().into(),
+            access: FileSystemAccessMode::Deny,
+            missing_path_behavior: None,
+        },
+        FileSystemSandboxEntry {
+            path: selected.clone().into(),
+            access: FileSystemAccessMode::Read,
+            missing_path_behavior: None,
+        },
+    ]);
+    let args = create_filesystem_args(&policy, temp_dir.path(), BwrapOptions::default())
+        .expect("create mixed filesystem layers")
+        .args;
+
+    let broad_write = args
+        .windows(3)
+        .position(|window| window == ["--bind", writable_path.as_str(), writable_path.as_str()])
+        .expect("broad workspace should be writable");
+    let service_mask = args
+        .windows(4)
+        .position(|window| window == ["--perms", "111", "--tmpfs", service_path.as_str()])
+        .expect("service data should be masked");
+    let service_remount = args
+        .windows(2)
+        .position(|window| window == ["--remount-ro", service_path.as_str()])
+        .expect("service mask should be read-only");
+    let selected_reopen = args
+        .windows(3)
+        .position(|window| window == ["--ro-bind", selected_path.as_str(), selected_path.as_str()])
+        .filter(|index| *index > service_remount)
+        .expect("selected data should reopen after the deeper deny");
+    assert!(broad_write < service_mask);
+    assert!(service_mask < service_remount);
+    assert!(service_remount < selected_reopen);
 }
 
 #[test]

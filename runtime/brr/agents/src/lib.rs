@@ -2,6 +2,8 @@ mod memory;
 mod profiles;
 mod questions;
 mod schedule;
+mod shared;
+mod shared_validate;
 mod tasks;
 mod tickets;
 
@@ -10,7 +12,7 @@ use sha2::{Digest, Sha256};
 use sqlx::{SqlitePool, sqlite::SqlitePoolOptions};
 use std::{
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, RwLock},
 };
 use uuid::Uuid;
 
@@ -20,6 +22,7 @@ pub use questions::{
     NewQuestionRequest, Question, QuestionAnswers, QuestionOption, QuestionRequest,
 };
 pub use schedule::{Workflow, WorkflowInput};
+pub use shared::{SharedRow, SharedSnapshot, SharedTable, shared_entity_id, shared_local_id};
 pub use tasks::{
     DelegationNode, DelegationProposal, Task, TaskAction, TaskInput, TaskRun, TaskSettings,
     WorkspacePermission,
@@ -34,7 +37,10 @@ pub use tickets::{
 pub struct AgentStore {
     pub(crate) pool: SqlitePool,
     pub(crate) root: Arc<PathBuf>,
+    shared_commit_hook: Arc<RwLock<Option<SharedCommitHook>>>,
 }
+
+pub type SharedCommitHook = Arc<dyn Fn(&SharedSnapshot) -> Result<String, String> + Send + Sync>;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -77,10 +83,91 @@ impl AgentStore {
         tickets::init(&pool).await?;
         questions::init(&pool).await?;
         schedule::init(&pool).await?;
+        shared::init(&pool).await?;
         Ok(Self {
             pool,
             root: Arc::new(root),
+            shared_commit_hook: Arc::new(RwLock::new(None)),
         })
+    }
+
+    /// Installs the synchronous authority hook used before shared SQL changes
+    /// commit. The hook receives a snapshot built from the active transaction.
+    pub fn set_shared_commit_hook<F>(&self, hook: F)
+    where
+        F: Fn(&SharedSnapshot) -> Result<String, String> + Send + Sync + 'static,
+    {
+        *self.shared_commit_hook.write().expect("shared hook lock") = Some(Arc::new(hook));
+    }
+
+    pub fn clear_shared_commit_hook(&self) {
+        *self.shared_commit_hook.write().expect("shared hook lock") = None;
+    }
+
+    /// Returns the local shared-data candidate for Git publication. Its rows
+    /// have no origin until fleet activation establishes the local identity.
+    pub async fn shared_snapshot(&self) -> Result<SharedSnapshot, String> {
+        let mut tx = self.pool.begin().await.map_err(|e| e.to_string())?;
+        let snapshot = shared::snapshot_tx(&mut tx).await?;
+        tx.rollback().await.map_err(|e| e.to_string())?;
+        Ok(snapshot)
+    }
+
+    /// Replaces only the validated shared SQL projection. Execution tables,
+    /// session bindings, schedules, and pending operations are left untouched.
+    pub async fn materialize_shared_snapshot(
+        &self,
+        local_node_id: &str,
+        snapshot: &SharedSnapshot,
+        revision: &str,
+    ) -> Result<(), String> {
+        shared::materialize(&self.pool, local_node_id, snapshot, revision).await
+    }
+
+    /// Reads authority inside the SQL writer transaction. Git commits use the
+    /// same SQL-then-Git lock order, so recovery cannot overwrite a newer write.
+    pub async fn materialize_shared_from<F>(
+        &self,
+        local_node_id: &str,
+        read: F,
+    ) -> Result<String, String>
+    where
+        F: FnOnce() -> Result<(String, SharedSnapshot), String> + Send,
+    {
+        shared::materialize_from(&self.pool, local_node_id, read).await
+    }
+
+    pub async fn materialized_shared_snapshot(
+        &self,
+    ) -> Result<Option<(String, SharedSnapshot)>, String> {
+        shared::materialized(&self.pool).await
+    }
+
+    /// Resolves an imported local SQL ID to its immutable Git origin identity.
+    pub async fn shared_origin(
+        &self,
+        table: SharedTable,
+        local_id: &str,
+    ) -> Result<Option<(String, String)>, String> {
+        shared::origin(&self.pool, table, local_id).await
+    }
+
+    pub(crate) async fn before_shared_commit(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    ) -> Result<(), String> {
+        let hook = self
+            .shared_commit_hook
+            .read()
+            .expect("shared hook lock")
+            .clone();
+        let Some(hook) = hook else {
+            return Ok(());
+        };
+        let snapshot = shared::snapshot_tx(tx).await?;
+        let revision = hook(&snapshot)?;
+        shared::persist_projection(tx, &snapshot, &revision).await?;
+        Ok(())
     }
 
     pub async fn events(&self, after: i64, limit: i64) -> Result<Vec<AgentEvent>, String> {

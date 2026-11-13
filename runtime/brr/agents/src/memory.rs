@@ -215,6 +215,7 @@ impl AgentStore {
             .execute(&mut *tx)
             .await
             .map_err(|e| e.to_string())?;
+        self.before_shared_commit(&mut tx).await?;
         tx.commit().await.map_err(|e| e.to_string())?;
         Ok(source)
     }
@@ -274,6 +275,7 @@ impl AgentStore {
         .execute(&mut *tx)
         .await
         .map_err(|e| e.to_string())?;
+        self.before_shared_commit(&mut tx).await?;
         tx.commit().await.map_err(|e| e.to_string())?;
         let _ = event;
         for skill_id in affected {
@@ -355,6 +357,7 @@ impl AgentStore {
             .execute(&mut *tx)
             .await
             .map_err(|e| e.to_string())?;
+        self.before_shared_commit(&mut tx).await?;
         tx.commit().await.map_err(|e| e.to_string())?;
         Ok(record)
     }
@@ -420,6 +423,7 @@ impl AgentStore {
             .await
             .map_err(|e| e.to_string())?;
         updated.event_id = Some(event);
+        self.before_shared_commit(&mut tx).await?;
         tx.commit().await.map_err(|e| e.to_string())?;
         Ok(updated)
     }
@@ -479,8 +483,22 @@ impl AgentStore {
         access: &MemoryAccess,
         id_or_source: &str,
     ) -> Result<i64, String> {
+        self.forget_memory_with_revision(access, id_or_source, None)
+            .await
+    }
+
+    /// Forget a memory or source only when its published numeric revision still matches.
+    pub async fn forget_memory_with_revision(
+        &self,
+        access: &MemoryAccess,
+        id_or_source: &str,
+        expected_revision: Option<i64>,
+    ) -> Result<i64, String> {
         let mut tx = self.pool.begin().await.map_err(|e| e.to_string())?;
         if let Some(record) = record_by_id(&mut tx, id_or_source).await? {
+            if expected_revision.is_some_and(|revision| revision != record.revision) {
+                return Err("memory revision changed; reload before forgetting".into());
+            }
             if !can_access(access, &record.scope, &record.scope_id) {
                 return Err("memory is outside this session's scope".into());
             }
@@ -571,6 +589,7 @@ impl AgentStore {
                     .await
                     .map_err(|e| e.to_string())?;
             }
+            self.before_shared_commit(&mut tx).await?;
             tx.commit().await.map_err(|e| e.to_string())?;
             for source in sources {
                 self.remove_skill_packages_for_sources(&source).await?;
@@ -580,6 +599,9 @@ impl AgentStore {
         let source = source_by_id(&mut tx, id_or_source)
             .await?
             .ok_or_else(|| "memory or source not found".to_string())?;
+        if expected_revision.is_some_and(|revision| revision != source.revision) {
+            return Err("source revision changed; reload before forgetting".into());
+        }
         if !source_visible(access, &source) {
             return Err("source is outside this session's scope".into());
         }
@@ -647,6 +669,7 @@ impl AgentStore {
                 .await
                 .map_err(|e| e.to_string())?;
         }
+        self.before_shared_commit(&mut tx).await?;
         tx.commit().await.map_err(|e| e.to_string())?;
         self.remove_skill_packages_for_sources(id_or_source).await?;
         Ok(event)
@@ -762,6 +785,7 @@ impl AgentStore {
                 .await
                 .map_err(|e| e.to_string())?;
         }
+        self.before_shared_commit(&mut tx).await?;
         tx.commit().await.map_err(|e| e.to_string())?;
         for sid in sids {
             let active: i64 = sqlx::query_scalar("SELECT active FROM learned_skills WHERE id=?")
@@ -856,6 +880,7 @@ impl AgentStore {
             .execute(&mut *tx)
             .await
             .map_err(|e| e.to_string())?;
+        self.before_shared_commit(&mut tx).await?;
         tx.commit().await.map_err(|e| e.to_string())?;
         self.materialize_skill(&skill)?;
         Ok(skill)
@@ -879,19 +904,33 @@ impl AgentStore {
         Ok(out)
     }
     pub async fn revoke_skill(&self, access: &MemoryAccess, skill_id: &str) -> Result<(), String> {
-        let row = sqlx::query_as::<_, (String, String)>(
-            "SELECT scope,scope_id FROM learned_skills WHERE id=? AND active=1",
+        self.revoke_skill_with_revision(access, skill_id, None)
+            .await
+    }
+
+    /// Revoke a learned skill only if its current numeric revision matches.
+    pub async fn revoke_skill_with_revision(
+        &self,
+        access: &MemoryAccess,
+        skill_id: &str,
+        expected_revision: Option<i64>,
+    ) -> Result<(), String> {
+        let mut tx = self.pool.begin().await.map_err(|e| e.to_string())?;
+        let row = sqlx::query_as::<_, (String, String, i64)>(
+            "SELECT scope,scope_id,revision FROM learned_skills WHERE id=? AND active=1",
         )
         .bind(skill_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "skill not found".to_string())?;
+        if expected_revision.is_some_and(|revision| revision != row.2) {
+            return Err("skill revision changed; reload before revoking".into());
+        }
         let scope = parse_scope(&row.0)?;
         if !can_access(access, &scope, &row.1) {
             return Err("skill is outside this session's scope".into());
         }
-        let mut tx = self.pool.begin().await.map_err(|e| e.to_string())?;
         sqlx::query("UPDATE learned_skills SET active=0,updated_at=? WHERE id=?")
             .bind(now())
             .bind(skill_id)
@@ -911,6 +950,7 @@ impl AgentStore {
             .execute(&mut *tx)
             .await
             .map_err(|e| e.to_string())?;
+        self.before_shared_commit(&mut tx).await?;
         tx.commit().await.map_err(|e| e.to_string())?;
         self.remove_skill_package(skill_id).await
     }

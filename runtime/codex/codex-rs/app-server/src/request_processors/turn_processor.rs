@@ -701,14 +701,42 @@ impl TurnRequestProcessor {
 
         #[cfg(feature = "brr-runtime")]
         {
+            let service_data_root = std::env::var_os("BRR_SERVICE_DATA_DIR")
+                .map(std::path::PathBuf::from)
+                .ok_or_else(|| invalid_request("Brr service data root is unavailable"))?;
+            let saved_settings = thread.restorable_thread_settings().await;
             let profile = match thread_settings.permission_profile.take() {
                 Some(profile) => profile,
-                None => thread.restorable_thread_settings().await.permission_profile
+                None => saved_settings
+                    .permission_profile
                     .ok_or_else(|| invalid_request("Brr permissions are unavailable"))?,
             };
-            thread_settings.permission_profile = Some(brr_chat_permissions::scoped_chat_profile(
-                profile, &self.config.codex_home, &params.thread_id,
-            ).map_err(invalid_request)?);
+            let environment_requests = thread_settings
+                .environments
+                .as_ref()
+                .or(saved_settings.environments.as_ref())
+                .ok_or_else(|| invalid_request("Brr environments are unavailable"))?;
+            let workspace_cwd = environment_requests
+                .environment_requests
+                .iter()
+                .find(|request| request.environment_id == LOCAL_ENVIRONMENT_ID)
+                .map(|request| {
+                    request.cwd.to_abs_path().map_err(|error| {
+                        invalid_request(format!("invalid local environment cwd: {error}"))
+                    })
+                })
+                .transpose()?
+                .unwrap_or_else(|| environment_requests.legacy_fallback_cwd.clone());
+            thread_settings.permission_profile = Some(
+                brr_chat_permissions::scoped_chat_profile(
+                    profile,
+                    &self.config.codex_home,
+                    &service_data_root,
+                    workspace_cwd.as_path(),
+                    &params.thread_id,
+                )
+                .map_err(invalid_request)?,
+            );
         }
 
         let submission = thread

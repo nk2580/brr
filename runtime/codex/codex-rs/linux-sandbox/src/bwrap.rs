@@ -130,6 +130,12 @@ pub(crate) struct BwrapArgs {
     pub synthetic_mount_targets: Vec<SyntheticMountTarget>,
 }
 
+enum FilesystemMountEvent {
+    Read(PathBuf),
+    Write(usize),
+    Deny(PathBuf),
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct FileIdentity {
     dev: u64,
@@ -397,15 +403,13 @@ fn create_bwrap_flags(
 ///    `--tmpfs /` and layer scoped `--ro-bind` mounts.
 /// 2. `--dev /dev` mounts a minimal writable `/dev` with standard device nodes
 ///    (including `/dev/urandom`) even under a read-only root.
-/// 3. Unreadable ancestors of writable roots are masked before their child
-///    mounts are rebound so nested writable carveouts can be reopened safely.
-/// 4. `--bind <root> <root>` re-enables writes for allowed roots, including
-///    writable subpaths under `/dev` (for example, `/dev/shm`). Binding `/`
-///    recreates the minimal `/dev` before applying any carveouts below it.
-/// 5. `--ro-bind <subpath> <subpath>` re-applies read-only protections under
-///    those writable roots so protected subpaths win.
-/// 6. Nested unreadable carveouts under a writable root are masked after that
-///    root is bound, and unrelated unreadable roots are masked afterward.
+/// 3. Deny, read, and write roots below one another are applied in path-depth
+///    order. A denied directory creates targets for every later child grant
+///    before it is remounted read-only; direct late binds then reopen only the
+///    exact read/write child roots.
+/// 4. Writable-root bodies retain their metadata, daemon-socket, and symlink
+///    masks. A deeper deny or read-only root is applied after its shallower
+///    writable root, so it cannot be undone by that parent bind.
 fn create_filesystem_args(
     file_system_sandbox_policy: &FileSystemSandboxPolicy,
     cwd: &Path,
@@ -500,6 +504,32 @@ fn create_filesystem_args(
     unreadable_roots.sort();
     unreadable_roots.dedup();
 
+    let mut readable_roots: BTreeSet<PathBuf> = file_system_sandbox_policy
+        .get_readable_roots_with_cwd(cwd)
+        .into_iter()
+        .map(PathBuf::from)
+        .collect();
+    if file_system_sandbox_policy.include_platform_defaults() {
+        readable_roots.extend(
+            LINUX_PLATFORM_DEFAULT_READ_ROOTS
+                .iter()
+                .map(|path| PathBuf::from(*path))
+                .filter(|path| path.exists()),
+        );
+        if options.inherit_pid_namespace {
+            // Reuse the caller's procfs, including its submount masks. Bind it
+            // with the other read roots so explicit deny rules still win.
+            readable_roots.insert(PathBuf::from("/proc"));
+        }
+    }
+    let deferred_readable_roots = readable_roots
+        .iter()
+        .filter(|root| {
+            root.exists() && should_defer_readable_root(root, &unreadable_roots, &writable_roots)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let deferred_readable_set: HashSet<PathBuf> = deferred_readable_roots.iter().cloned().collect();
     let mut args = if file_system_sandbox_policy.has_full_disk_read_access() {
         // Read-only root, then mount a minimal device tree.
         // In bubblewrap (`bubblewrap.c`, `SETUP_MOUNT_DEV`), `--dev /dev`
@@ -523,25 +553,6 @@ fn create_filesystem_args(
             "/dev".to_string(),
         ];
 
-        let mut readable_roots: BTreeSet<PathBuf> = file_system_sandbox_policy
-            .get_readable_roots_with_cwd(cwd)
-            .into_iter()
-            .map(PathBuf::from)
-            .collect();
-        if file_system_sandbox_policy.include_platform_defaults() {
-            readable_roots.extend(
-                LINUX_PLATFORM_DEFAULT_READ_ROOTS
-                    .iter()
-                    .map(|path| PathBuf::from(*path))
-                    .filter(|path| path.exists()),
-            );
-            if options.inherit_pid_namespace {
-                // Reuse the caller's procfs, including its submount masks. Bind it
-                // with the other read roots so explicit deny rules still win.
-                readable_roots.insert(PathBuf::from("/proc"));
-            }
-        }
-
         // A restricted policy can still explicitly request `/`, which is
         // the broad read baseline. Explicit unreadable carveouts are
         // re-applied later.
@@ -554,8 +565,8 @@ fn create_filesystem_args(
                 "/dev".to_string(),
             ];
         } else {
-            for root in readable_roots {
-                if !root.exists() {
+            for root in &readable_roots {
+                if !root.exists() || deferred_readable_set.contains(root) {
                     continue;
                 }
                 // Writable roots are rebound by real target below; mirror that
@@ -566,9 +577,9 @@ fn create_filesystem_args(
                     .iter()
                     .any(|writable_root| root.starts_with(writable_root.root.as_path()))
                 {
-                    canonical_target_if_symlinked_path(&root).unwrap_or(root)
+                    canonical_target_if_symlinked_path(root).unwrap_or_else(|| root.clone())
                 } else {
-                    root
+                    root.clone()
                 };
                 args.push("--ro-bind".to_string());
                 args.push(path_to_string(&mount_root));
@@ -601,175 +612,89 @@ fn create_filesystem_args(
     let binds_file_system_root = sorted_writable_roots
         .iter()
         .any(|writable_root| writable_root.root.as_path() == Path::new("/"));
-    // Mask only the unreadable ancestors that sit outside every writable root.
-    // Unreadable paths nested under a broader writable root are applied after
-    // that broader root is bound, then reopened by any deeper writable child.
-    let mut unreadable_ancestors_of_writable_roots: Vec<PathBuf> = unreadable_roots
-        .iter()
-        .filter(|path| {
-            let unreadable_root = path.as_path();
-            !allowed_write_paths
-                .iter()
-                .any(|root| unreadable_root.starts_with(root))
-                && allowed_write_paths
-                    .iter()
-                    .any(|root| root.starts_with(unreadable_root))
-        })
-        .cloned()
-        .collect();
-    unreadable_ancestors_of_writable_roots.sort_by_key(|path| path_depth(path));
-
-    for unreadable_root in &unreadable_ancestors_of_writable_roots {
-        append_unreadable_root_args(&mut bwrap_args, unreadable_root, &allowed_write_paths)?;
-    }
-
+    let mut permitted_rebind_paths = deferred_readable_roots.clone();
     for writable_root in &sorted_writable_roots {
-        let root = writable_root.root.as_path();
-        let symlink_target = canonical_target_if_symlinked_path(root);
-        // If a denied ancestor was already masked, recreate any missing mount
-        // target parents before binding the narrower writable descendant.
-        if let Some(masking_root) = unreadable_roots
-            .iter()
-            .map(PathBuf::as_path)
-            .filter(|unreadable_root| root.starts_with(unreadable_root))
-            .max_by_key(|unreadable_root| path_depth(unreadable_root))
-        {
-            append_mount_target_parent_dir_args(&mut bwrap_args.args, root, masking_root);
-        }
-
-        let mount_root = symlink_target.as_deref().unwrap_or(root);
-        // Rebinding a root alias would also undo masks already applied to `/`.
-        // The physical root is already writable; only the alias's carveouts remain.
-        let redundant_root_alias =
-            binds_file_system_root && root != Path::new("/") && mount_root == Path::new("/");
-        if !redundant_root_alias {
-            bwrap_args.args.push("--bind".to_string());
-            bwrap_args.args.push(path_to_string(mount_root));
-            bwrap_args.args.push(path_to_string(mount_root));
-            if mount_root == Path::new("/") {
-                // The root bind shadows the earlier device tree and applies nodev.
-                // Recreate only standard devices before applying explicit deny masks.
-                bwrap_args.args.extend([
-                    "--dev".to_string(),
-                    "/dev".to_string(),
-                    "--bind-try".to_string(),
-                    "/dev/shm".to_string(),
-                    "/dev/shm".to_string(),
-                ]);
-            }
-            append_daemon_socket_masks(&mut bwrap_args.args, mount_root, &daemon_directories)?;
-        }
-
-        let mut read_only_subpaths: Vec<PathBuf> = writable_root
-            .read_only_subpaths
-            .iter()
-            .map(|path| path.as_path().to_path_buf())
-            .filter(|path| !unreadable_paths.contains(path))
-            .filter(|path| !missing_auto_metadata_read_only_project_root_subpaths.contains(path))
-            .collect();
-        // Remember which mounts belong to a deeper writable root without dropping
-        // their paths: every path must still be remapped and validated below.
-        let mut deferred_read_only_subpaths: Vec<PathBuf> = read_only_subpaths
-            .iter()
-            .filter(|path| {
-                sorted_writable_roots.iter().any(|nested_root| {
-                    let nested_path = nested_root.root.as_path();
-                    nested_path != root
-                        && nested_path.starts_with(root)
-                        && path.starts_with(nested_path)
-                        && nested_root
-                            .read_only_subpaths
-                            .iter()
-                            .any(|nested_subpath| nested_subpath.as_path() == path.as_path())
-                })
-            })
-            .cloned()
-            .collect();
-        let protected_metadata_names = &writable_root.protected_metadata_names;
-        append_metadata_path_masks_for_writable_root(
-            &mut read_only_subpaths,
-            root,
-            protected_metadata_names,
-        );
-        if let Some(target) = &symlink_target {
-            read_only_subpaths = remap_paths_for_symlink_target(read_only_subpaths, root, target);
-            deferred_read_only_subpaths =
-                remap_paths_for_symlink_target(deferred_read_only_subpaths, root, target);
-        }
-        read_only_subpaths.sort_by_key(|path| path_depth(path));
-        for subpath in read_only_subpaths {
-            if let Some(symlink) =
-                first_writable_symlink_component_in_path(&subpath, &allowed_write_paths)
-            {
-                /*
-                 * A read-only carveout under a writable symlink cannot be made reliable
-                 * with bwrap path arguments. Binding the symlink's current target would
-                 * only protect a startup-time snapshot; the sandboxed process could
-                 * replace the writable symlink before it reads through the logical path.
-                 */
-                return Err(CodexErr::Fatal(format!(
-                    "cannot enforce sandbox read-only path {} because it crosses writable symlink {}",
-                    subpath.display(),
-                    symlink.display()
-                )));
-            }
-            // Defer only the mount, after the same validation as an immediate mount.
-            if deferred_read_only_subpaths.contains(&subpath) {
-                continue;
-            }
-            append_read_only_subpath_args(
-                &mut bwrap_args,
-                &subpath,
-                &allowed_write_paths,
-                &daemon_directories,
-            )?;
-        }
-        // Protect the registry only where a writable bind exposes it. Apply
-        // this before deny masks so a denied parent stays hidden, rather than
-        // trying to recreate the registry beneath an already read-only tmpfs.
-        let registry_root = synthetic_mount_registry_root();
-        let registry_mount = if registry_root.starts_with(mount_root) {
-            Some(registry_root.as_path())
-        } else if mount_root.starts_with(&registry_root) {
-            Some(mount_root)
-        } else {
-            None
-        };
-        if let Some(registry_mount) = registry_mount {
-            fs::create_dir_all(&registry_root)?;
-            bwrap_args.args.push("--ro-bind".to_string());
-            bwrap_args.args.push(path_to_string(registry_mount));
-            bwrap_args.args.push(path_to_string(registry_mount));
-            append_daemon_socket_masks(&mut bwrap_args.args, registry_mount, &daemon_directories)?;
-        }
-        let mut nested_unreadable_roots: Vec<PathBuf> = unreadable_roots
-            .iter()
-            .filter(|path| path.starts_with(root))
-            .cloned()
-            .collect();
-        if let Some(target) = &symlink_target {
-            nested_unreadable_roots =
-                remap_paths_for_symlink_target(nested_unreadable_roots, root, target);
-        }
-        nested_unreadable_roots.sort_by_key(|path| path_depth(path));
-        for unreadable_root in nested_unreadable_roots {
-            append_unreadable_root_args(&mut bwrap_args, &unreadable_root, &allowed_write_paths)?;
+        permitted_rebind_paths.push(writable_root.root.as_path().to_path_buf());
+        if let Some(target) = canonical_target_if_symlinked_path(writable_root.root.as_path()) {
+            permitted_rebind_paths.push(target);
         }
     }
+    permitted_rebind_paths.sort();
+    permitted_rebind_paths.dedup();
 
-    let mut rootless_unreadable_roots: Vec<PathBuf> = unreadable_roots
-        .iter()
-        .filter(|path| {
-            let unreadable_root = path.as_path();
-            !allowed_write_paths
-                .iter()
-                .any(|root| unreadable_root.starts_with(root) || root.starts_with(unreadable_root))
-        })
-        .cloned()
-        .collect();
-    rootless_unreadable_roots.sort_by_key(|path| path_depth(path));
-    for unreadable_root in rootless_unreadable_roots {
-        append_unreadable_root_args(&mut bwrap_args, &unreadable_root, &allowed_write_paths)?;
+    let mut mount_events = Vec::new();
+    for readable_root in &deferred_readable_roots {
+        let effective_root = remap_path_for_writable_root(readable_root, &sorted_writable_roots);
+        mount_events.push((
+            path_depth(&effective_root),
+            0_u8,
+            effective_root.clone(),
+            FilesystemMountEvent::Read(effective_root),
+        ));
+    }
+    for (index, writable_root) in sorted_writable_roots.iter().enumerate() {
+        let root = writable_root.root.as_path();
+        let order_path = canonical_target_if_symlinked_path(root).unwrap_or_else(|| root.into());
+        mount_events.push((
+            path_depth(&order_path),
+            1_u8,
+            order_path,
+            FilesystemMountEvent::Write(index),
+        ));
+    }
+    for unreadable_root in &unreadable_roots {
+        let effective_root = remap_path_for_writable_root(unreadable_root, &sorted_writable_roots);
+        mount_events.push((
+            path_depth(&effective_root),
+            2_u8,
+            effective_root.clone(),
+            FilesystemMountEvent::Deny(effective_root),
+        ));
+    }
+    mount_events.sort_by(|left, right| {
+        left.0
+            .cmp(&right.0)
+            .then_with(|| left.1.cmp(&right.1))
+            .then_with(|| left.2.cmp(&right.2))
+    });
+
+    for (_, _, _, event) in mount_events {
+        match event {
+            FilesystemMountEvent::Read(root) => {
+                if !root.exists() {
+                    continue;
+                }
+                bwrap_args.args.extend([
+                    "--ro-bind".to_string(),
+                    path_to_string(&root),
+                    path_to_string(&root),
+                ]);
+                append_daemon_socket_masks(&mut bwrap_args.args, &root, &daemon_directories)?;
+            }
+            FilesystemMountEvent::Write(index) => append_writable_root_mount_args(
+                &mut bwrap_args,
+                &sorted_writable_roots[index],
+                &sorted_writable_roots,
+                &unreadable_paths,
+                &missing_auto_metadata_read_only_project_root_subpaths,
+                &allowed_write_paths,
+                binds_file_system_root,
+                &daemon_directories,
+            )?,
+            FilesystemMountEvent::Deny(root) => {
+                let permitted_descendants = permitted_rebind_paths
+                    .iter()
+                    .map(|path| remap_path_for_writable_root(path, &sorted_writable_roots))
+                    .filter(|path| path != &root && path.starts_with(&root))
+                    .collect::<Vec<_>>();
+                append_unreadable_root_args(
+                    &mut bwrap_args,
+                    &root,
+                    &allowed_write_paths,
+                    &permitted_descendants,
+                )?;
+            }
+        }
     }
 
     if options.mask_wslg_distro
@@ -796,6 +721,124 @@ fn create_filesystem_args(
     }
 
     Ok(bwrap_args)
+}
+
+fn append_writable_root_mount_args(
+    bwrap_args: &mut BwrapArgs,
+    writable_root: &WritableRoot,
+    sorted_writable_roots: &[WritableRoot],
+    unreadable_paths: &HashSet<PathBuf>,
+    missing_auto_metadata_read_only_project_root_subpaths: &HashSet<PathBuf>,
+    allowed_write_paths: &[PathBuf],
+    binds_file_system_root: bool,
+    daemon_directories: &BTreeSet<PathBuf>,
+) -> Result<()> {
+    let root = writable_root.root.as_path();
+    let symlink_target = canonical_target_if_symlinked_path(root);
+    let mount_root = symlink_target.as_deref().unwrap_or(root);
+    // Rebinding a root alias would also undo masks already applied to `/`.
+    // The physical root is already writable; only the alias's carveouts remain.
+    let redundant_root_alias =
+        binds_file_system_root && root != Path::new("/") && mount_root == Path::new("/");
+    if !redundant_root_alias {
+        bwrap_args.args.push("--bind".to_string());
+        bwrap_args.args.push(path_to_string(mount_root));
+        bwrap_args.args.push(path_to_string(mount_root));
+        if mount_root == Path::new("/") {
+            // The root bind shadows the earlier device tree and applies nodev.
+            // Recreate only standard devices before applying explicit deny masks.
+            bwrap_args.args.extend([
+                "--dev".to_string(),
+                "/dev".to_string(),
+                "--bind-try".to_string(),
+                "/dev/shm".to_string(),
+                "/dev/shm".to_string(),
+            ]);
+        }
+        append_daemon_socket_masks(&mut bwrap_args.args, mount_root, daemon_directories)?;
+    }
+
+    let mut read_only_subpaths: Vec<PathBuf> = writable_root
+        .read_only_subpaths
+        .iter()
+        .map(|path| path.as_path().to_path_buf())
+        .filter(|path| !unreadable_paths.contains(path))
+        .filter(|path| !missing_auto_metadata_read_only_project_root_subpaths.contains(path))
+        .collect();
+    // Remember which mounts belong to a deeper writable root without dropping
+    // their paths: every path must still be remapped and validated below.
+    let mut deferred_read_only_subpaths: Vec<PathBuf> = read_only_subpaths
+        .iter()
+        .filter(|path| {
+            sorted_writable_roots.iter().any(|nested_root| {
+                let nested_path = nested_root.root.as_path();
+                nested_path != root
+                    && nested_path.starts_with(root)
+                    && path.starts_with(nested_path)
+                    && nested_root
+                        .read_only_subpaths
+                        .iter()
+                        .any(|nested_subpath| nested_subpath.as_path() == path.as_path())
+            })
+        })
+        .cloned()
+        .collect();
+    append_metadata_path_masks_for_writable_root(
+        &mut read_only_subpaths,
+        root,
+        &writable_root.protected_metadata_names,
+    );
+    if let Some(target) = &symlink_target {
+        read_only_subpaths = remap_paths_for_symlink_target(read_only_subpaths, root, target);
+        deferred_read_only_subpaths =
+            remap_paths_for_symlink_target(deferred_read_only_subpaths, root, target);
+    }
+    read_only_subpaths.sort_by_key(|path| path_depth(path));
+    for subpath in read_only_subpaths {
+        if let Some(symlink) =
+            first_writable_symlink_component_in_path(&subpath, allowed_write_paths)
+        {
+            /*
+             * A read-only carveout under a writable symlink cannot be made reliable
+             * with bwrap path arguments. Binding the symlink's current target would
+             * only protect a startup-time snapshot; the sandboxed process could
+             * replace the writable symlink before it reads through the logical path.
+             */
+            return Err(CodexErr::Fatal(format!(
+                "cannot enforce sandbox read-only path {} because it crosses writable symlink {}",
+                subpath.display(),
+                symlink.display()
+            )));
+        }
+        // Defer only the mount, after the same validation as an immediate mount.
+        if deferred_read_only_subpaths.contains(&subpath) {
+            continue;
+        }
+        append_read_only_subpath_args(
+            bwrap_args,
+            &subpath,
+            allowed_write_paths,
+            daemon_directories,
+        )?;
+    }
+
+    // Protect the registry only where a writable bind exposes it.
+    let registry_root = synthetic_mount_registry_root();
+    let registry_mount = if registry_root.starts_with(mount_root) {
+        Some(registry_root.as_path())
+    } else if mount_root.starts_with(&registry_root) {
+        Some(mount_root)
+    } else {
+        None
+    };
+    if let Some(registry_mount) = registry_mount {
+        fs::create_dir_all(&registry_root)?;
+        bwrap_args.args.push("--ro-bind".to_string());
+        bwrap_args.args.push(path_to_string(registry_mount));
+        bwrap_args.args.push(path_to_string(registry_mount));
+        append_daemon_socket_masks(&mut bwrap_args.args, registry_mount, daemon_directories)?;
+    }
+    Ok(())
 }
 
 fn append_metadata_path_masks_for_writable_root(
@@ -1234,6 +1277,46 @@ fn append_mount_target_parent_dir_args(args: &mut Vec<String>, mount_target: &Pa
     }
 }
 
+fn remap_path_for_writable_root(path: &Path, writable_roots: &[WritableRoot]) -> PathBuf {
+    let Some(writable_root) = writable_roots
+        .iter()
+        .filter(|root| path.starts_with(root.root.as_path()))
+        .max_by_key(|root| path_depth(root.root.as_path()))
+    else {
+        return path.to_path_buf();
+    };
+    let root = writable_root.root.as_path();
+    let Some(target) = canonical_target_if_symlinked_path(root) else {
+        return path.to_path_buf();
+    };
+    path.strip_prefix(root)
+        .map(|relative| target.join(relative))
+        .unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn should_defer_readable_root(
+    readable_root: &Path,
+    unreadable_roots: &[PathBuf],
+    writable_roots: &[WritableRoot],
+) -> bool {
+    let deepest_denied_ancestor = unreadable_roots
+        .iter()
+        .map(PathBuf::as_path)
+        .filter(|denied| readable_root.starts_with(denied) && readable_root != *denied)
+        .max_by_key(|denied| path_depth(denied));
+    let Some(deepest_denied_ancestor) = deepest_denied_ancestor else {
+        return false;
+    };
+    let deepest_writable_ancestor = writable_roots
+        .iter()
+        .map(|writable| writable.root.as_path())
+        .filter(|writable| readable_root.starts_with(writable))
+        .max_by_key(|writable| path_depth(writable));
+    deepest_writable_ancestor
+        .map(|writable| path_depth(writable) <= path_depth(deepest_denied_ancestor))
+        .unwrap_or(true)
+}
+
 /// Append mounts for a read-only path after writable-symlink validation.
 fn append_read_only_subpath_args(
     bwrap_args: &mut BwrapArgs,
@@ -1284,6 +1367,23 @@ fn append_empty_file_bind_data_args(bwrap_args: &mut BwrapArgs, path: &Path) -> 
     bwrap_args.args.push("--ro-bind-data".to_string());
     bwrap_args.args.push(null_fd);
     bwrap_args.args.push(path_to_string(path));
+    Ok(())
+}
+
+fn append_empty_file_target_args(bwrap_args: &mut BwrapArgs, path: &Path) -> Result<()> {
+    // `--ro-bind-data` mounts its descriptor and requires an existing target.
+    // A denied parent has been replaced by tmpfs, so create an empty leaf in
+    // that tmpfs before remounting the parent; a later bind replaces the leaf.
+    let null_file = File::open("/dev/null")?;
+    let null_fd = null_file.as_raw_fd().to_string();
+    bwrap_args.preserved_files.push(null_file);
+    bwrap_args.args.extend([
+        "--perms".to_string(),
+        "0444".to_string(),
+        "--file".to_string(),
+        null_fd,
+        path_to_string(path),
+    ]);
     Ok(())
 }
 
@@ -1345,6 +1445,7 @@ fn append_unreadable_root_args(
     bwrap_args: &mut BwrapArgs,
     unreadable_root: &Path,
     allowed_write_paths: &[PathBuf],
+    permitted_descendants: &[PathBuf],
 ) -> Result<()> {
     if let Some(symlink) =
         first_writable_symlink_component_in_path(unreadable_root, allowed_write_paths)
@@ -1372,42 +1473,39 @@ fn append_unreadable_root_args(
         return Ok(());
     }
 
-    append_existing_unreadable_path_args(bwrap_args, unreadable_root, allowed_write_paths)
+    append_existing_unreadable_path_args(bwrap_args, unreadable_root, permitted_descendants)
 }
 
 fn append_existing_unreadable_path_args(
     bwrap_args: &mut BwrapArgs,
     unreadable_root: &Path,
-    allowed_write_paths: &[PathBuf],
+    permitted_descendants: &[PathBuf],
 ) -> Result<()> {
     if unreadable_root.is_dir() {
-        let mut writable_descendants: Vec<&Path> = allowed_write_paths
+        let mut permitted_descendants: Vec<&Path> = permitted_descendants
             .iter()
             .map(PathBuf::as_path)
             .filter(|path| *path != unreadable_root && path.starts_with(unreadable_root))
             .collect();
         bwrap_args.args.push("--perms".to_string());
-        // Execute-only perms let the process traverse into explicitly
-        // re-opened writable descendants while still hiding the denied
-        // directory contents. Plain denied directories with no writable child
-        // mounts stay at `000`.
-        bwrap_args.args.push(if writable_descendants.is_empty() {
+        // Execute-only perms let the process traverse into explicitly reopened
+        // read/write descendants while still hiding the denied directory contents.
+        bwrap_args.args.push(if permitted_descendants.is_empty() {
             "000".to_string()
         } else {
             "111".to_string()
         });
         bwrap_args.args.push("--tmpfs".to_string());
         bwrap_args.args.push(path_to_string(unreadable_root));
-        // Recreate any writable descendants inside the tmpfs before remounting
-        // the denied parent read-only. Otherwise bubblewrap cannot mkdir the
-        // nested mount targets after the parent has been frozen.
-        writable_descendants.sort_by_key(|path| path_depth(path));
-        for writable_descendant in writable_descendants {
-            append_mount_target_parent_dir_args(
-                &mut bwrap_args.args,
-                writable_descendant,
-                unreadable_root,
-            );
+        // Every descendant mount target must exist before this parent becomes
+        // read-only. File roots need a leaf placeholder as well as the directory
+        // chain; append_mount_target_parent_dir_args only creates directories.
+        permitted_descendants.sort_by_key(|path| path_depth(path));
+        for descendant in permitted_descendants {
+            append_mount_target_parent_dir_args(&mut bwrap_args.args, descendant, unreadable_root);
+            if descendant.is_file() {
+                append_empty_file_target_args(bwrap_args, descendant)?;
+            }
         }
         bwrap_args.args.push("--remount-ro".to_string());
         bwrap_args.args.push(path_to_string(unreadable_root));

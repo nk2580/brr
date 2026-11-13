@@ -28,7 +28,10 @@ mod chat_project_reference_tests;
 
 use bridge::Engine;
 use serde_json::{json, Value};
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 use tauri::{Emitter, Manager, State};
 use tokio::sync::Mutex;
 
@@ -79,13 +82,31 @@ mod runtime_tests {
         );
     }
 
+    #[test]
+    fn desktop_runtime_protects_its_app_data_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = dir.path().join("brr-runtime");
+        let home = dir.path().join("engine");
+        let command = runtime_command_for(runtime, &home, dir.path());
+        let protected_root = command
+            .as_std()
+            .get_envs()
+            .find_map(|(key, value)| (key == "BRR_SERVICE_DATA_DIR").then_some(value))
+            .flatten()
+            .map(std::path::Path::new);
+        assert_eq!(protected_root, Some(dir.path()));
+    }
+
     #[tokio::test]
     #[ignore = "requires the source-built Brr runtime; run pnpm native:smoke"]
     async fn connects_to_owned_runtime_with_isolated_account_and_refuses_inference() {
         let dir = tempfile::tempdir().unwrap();
-        let runtime = Engine::connect(runtime_command(dir.path()).unwrap(), Arc::new(|_| {}))
-            .await
-            .unwrap();
+        let runtime = Engine::connect(
+            runtime_command(dir.path(), dir.path()).unwrap(),
+            Arc::new(|_| {}),
+        )
+        .await
+        .unwrap();
         let account = runtime
             .request("account/read", json!({"refreshToken":false}))
             .await
@@ -111,9 +132,12 @@ mod runtime_tests {
     #[ignore = "requires the source-built Brr runtime; validates its real managed-thread protocol"]
     async fn owned_runtime_accepts_agent_tools_and_context_without_relaxing_authentication() {
         let dir = tempfile::tempdir().unwrap();
-        let runtime = Engine::connect(runtime_command(dir.path()).unwrap(), Arc::new(|_| {}))
-            .await
-            .unwrap();
+        let runtime = Engine::connect(
+            runtime_command(dir.path(), dir.path()).unwrap(),
+            Arc::new(|_| {}),
+        )
+        .await
+        .unwrap();
         runtime.verify_agent_protocol().await.unwrap();
         runtime.shutdown().await;
     }
@@ -131,9 +155,12 @@ mod runtime_tests {
             std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         }
         std::fs::copy(auth, dir.path().join("auth.json")).unwrap();
-        let runtime = Engine::connect(runtime_command(dir.path()).unwrap(), Arc::new(|_| {}))
-            .await
-            .unwrap();
+        let runtime = Engine::connect(
+            runtime_command(dir.path(), dir.path()).unwrap(),
+            Arc::new(|_| {}),
+        )
+        .await
+        .unwrap();
         let result = runtime.verify_live_agent_task().await;
         runtime.shutdown().await;
         result.unwrap();
@@ -153,7 +180,7 @@ fn resolve_runtime(
     Err("Brr's runtime has not been built. Run pnpm runtime:build, then reconnect.".into())
 }
 
-fn runtime_command(home: &std::path::Path) -> Result<tokio::process::Command, String> {
+fn runtime_command(home: &Path, service_root: &Path) -> Result<tokio::process::Command, String> {
     let filename = if cfg!(windows) {
         "brr-runtime.exe"
     } else {
@@ -168,6 +195,14 @@ fn runtime_command(home: &std::path::Path) -> Result<tokio::process::Command, St
             .join(filename)
     });
     let executable = resolve_runtime(&packaged, development.as_deref())?;
+    Ok(runtime_command_for(executable, home, service_root))
+}
+
+fn runtime_command_for(
+    executable: PathBuf,
+    home: &Path,
+    service_root: &Path,
+) -> tokio::process::Command {
     let mut command = tokio::process::Command::new(executable);
     for name in [
         "OPENAI_API_KEY",
@@ -182,8 +217,11 @@ fn runtime_command(home: &std::path::Path) -> Result<tokio::process::Command, St
     ] {
         command.env_remove(name);
     }
-    command.env("CODEX_HOME", home).current_dir(home);
-    Ok(command)
+    command
+        .env("CODEX_HOME", home)
+        .env("BRR_SERVICE_DATA_DIR", service_root)
+        .current_dir(home);
+    command
 }
 
 #[tauri::command]
@@ -196,12 +234,14 @@ async fn engine_connect(
     if slot.as_ref().is_some_and(|engine| engine.is_alive()) {
         return Ok(());
     }
-    let home = app
+    let app_data = app
         .path()
         .app_data_dir()
-        .map_err(|e| e.to_string())?
-        .join("engine");
+        .map_err(|e| e.to_string())?;
+    let home = app_data.join("engine");
     std::fs::create_dir_all(&home).map_err(|e| e.to_string())?;
+    let home = home.canonicalize().map_err(|e| e.to_string())?;
+    let app_data = app_data.canonicalize().map_err(|e| e.to_string())?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -214,8 +254,13 @@ async fn engine_connect(
         let _ = app.emit("engine-event", message);
     });
     *slot = Some(Arc::new(
-        Engine::connect_with_stores(runtime_command(&home)?, events, agent_store, project_store)
-            .await?,
+        Engine::connect_with_stores(
+            runtime_command(&home, &app_data)?,
+            events,
+            agent_store,
+            project_store,
+        )
+        .await?,
     ));
     if let Some(engine) = slot.as_ref() {
         engine.set_browser_handler(browser_handler);

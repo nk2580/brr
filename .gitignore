@@ -36,3 +36,6 @@ projects/**/state.json
 projects/**/verification.md
 /evidence/
 website/public/downloads/
+
+crates/target/
+__pycache__/

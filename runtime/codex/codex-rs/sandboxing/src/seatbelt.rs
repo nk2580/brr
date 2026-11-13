@@ -3,6 +3,8 @@ use codex_network_proxy::NetworkProxy;
 use codex_network_proxy::PROXY_URL_ENV_KEYS;
 use codex_network_proxy::has_proxy_url_env_vars;
 use codex_network_proxy::proxy_url_env_value;
+use codex_protocol::permissions::FileSystemAccessMode;
+use codex_protocol::permissions::FileSystemPath;
 use codex_protocol::permissions::FileSystemSandboxPolicy;
 use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::permissions::PROTECTED_METADATA_PATH_NAMES;
@@ -621,6 +623,106 @@ fn protected_metadata_names_for_writable_root(
     names
 }
 
+/// Keeps the Brr service data tree private from tools running with the same UID.
+/// The managed filesystem policy may reopen only its exact current workspace
+/// and explicitly staged read roots beneath the service root.
+fn brr_service_data_policy(
+    policy: &FileSystemSandboxPolicy,
+    cwd: &Path,
+    service_root: &Path,
+) -> Result<String, SeatbeltPreparationError> {
+    let service_root = AbsolutePathBuf::try_from(service_root)
+        .map_err(|error| SeatbeltPreparationError::FileSystem(error.to_string()))?;
+    let quote = |path: &Path| {
+        serde_json::to_string(&path.to_string_lossy())
+            .map_err(|error| SeatbeltPreparationError::FileSystem(error.to_string()))
+    };
+    let mut rules = Vec::new();
+    for root in macos_path_aliases(service_root.as_path()) {
+        let root = quote(&root)?;
+        rules.push(format!(
+            "(deny file-read* file-write* (literal {root}) (subpath {root}))\n\
+             (deny network-outbound (remote unix-socket (subpath {root})))"
+        ));
+    }
+
+    let inside_root = |path: &Path| path.starts_with(service_root.as_path());
+    let mut readable = BTreeSet::new();
+    let mut writable = BTreeSet::new();
+    for entry in &policy.entries {
+        let FileSystemPath::Path { path } = &entry.path else {
+            continue;
+        };
+        let Ok(path) = path.to_abs_path() else {
+            continue;
+        };
+        let Ok(path) = AbsolutePathBuf::try_from(path.as_path()) else {
+            continue;
+        };
+        if !inside_root(path.as_path()) {
+            continue;
+        }
+        match entry.access {
+            FileSystemAccessMode::Read => {
+                readable.insert(path);
+            }
+            FileSystemAccessMode::Write => {
+                writable.insert(path);
+            }
+            FileSystemAccessMode::Deny => {}
+        }
+    }
+    for path in &readable {
+        for path in macos_path_aliases(path.as_path()) {
+            let path = quote(&path)?;
+            rules.push(format!(
+                "(allow file-read* (literal {path}) (subpath {path}))"
+            ));
+        }
+    }
+    for path in &writable {
+        for path in macos_path_aliases(path.as_path()) {
+            let path = quote(&path)?;
+            rules.push(format!(
+                "(allow file-read* file-write* (literal {path}) (subpath {path}))"
+            ));
+        }
+    }
+
+    // Reapply narrower denies after the carveouts, so a selected workspace
+    // cannot reopen protected descendants such as its own .git metadata.
+    let denied = policy
+        .get_unreadable_roots_with_cwd(cwd)
+        .into_iter()
+        .filter(|path| path.as_path() != service_root.as_path())
+        .filter(|path| inside_root(path.as_path()))
+        .collect::<BTreeSet<_>>();
+    for path in denied {
+        for path in macos_path_aliases(path.as_path()) {
+            let path = quote(&path)?;
+            rules.push(format!(
+                "(deny file-read* file-write* (literal {path}) (subpath {path}))"
+            ));
+        }
+    }
+    Ok(rules.join("\n"))
+}
+
+fn macos_path_aliases(path: &Path) -> Vec<PathBuf> {
+    let mut paths = vec![path.to_path_buf()];
+    if let Ok(without_private) = path.strip_prefix("/private") {
+        paths.push(Path::new("/").join(without_private));
+    } else if ["/var", "/tmp", "/etc"]
+        .iter()
+        .any(|prefix| path.starts_with(prefix))
+    {
+        paths.push(Path::new("/private").join(path.strip_prefix("/").unwrap_or(path)));
+    }
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
 fn build_seatbelt_unreadable_glob_policy(
     file_system_sandbox_policy: &FileSystemSandboxPolicy,
     cwd: &Path,
@@ -1061,6 +1163,14 @@ pub(crate) fn create_seatbelt_command_args_with_profile(
         let directory = codex_uds::shared_daemon_socket_directory()
             .map_err(|error| SeatbeltPreparationError::FileSystem(error.to_string()))?;
         policy_sections.push(daemon::protection_policy(&directory)?);
+    }
+    if let Some(service_data_root) = std::env::var_os("BRR_SERVICE_DATA_DIR") {
+        let service_data_root = PathBuf::from(service_data_root);
+        policy_sections.push(brr_service_data_policy(
+            file_system_sandbox_policy,
+            sandbox_policy_cwd,
+            &service_data_root,
+        )?);
     }
     policy_sections.push("(deny mach-lookup (xpc-service-name-prefix \"\"))".to_string());
     policy_sections.push(deny_read_policy);

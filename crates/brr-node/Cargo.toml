@@ -1,0 +1,49 @@
+[package]
+name = "brr-node"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[features]
+default = []
+host = ["dep:brr-host", "dep:brr-browser", "dep:brr-agent-core", "fleet"]
+fleet = ["dep:brr-fleet"]
+network = ["dep:brr-node-auth", "dep:axum", "dep:tokio-rustls", "dep:rustls", "dep:hyper-util", "dep:tower", "dep:reqwest", "dep:futures-util"]
+
+[[bin]]
+name = "brrd"
+path = "src/bin/brrd.rs"
+required-features = ["host", "network"]
+
+[[bin]]
+name = "brrctl"
+path = "src/bin/brrctl.rs"
+
+[dependencies]
+brr-remote-protocol = { path = "../brr-remote-protocol" }
+brr-host = { path = "../brr-host", optional = true }
+brr-agent-core = { path = "../../runtime/brr/agents", optional = true }
+brr-browser = { path = "../brr-browser", optional = true }
+brr-fleet = { path = "../brr-fleet", optional = true }
+brr-node-auth = { path = "../brr-node-auth", optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite"] }
+sha2 = "0.10"
+uuid = { version = "1", features = ["v4"] }
+fs2 = "0.4"
+axum = { version = "0.8.8", features = ["ws"], optional = true }
+tokio-rustls = { version = "0.26", optional = true }
+rustls = { version = "0.23", optional = true }
+hyper-util = { version = "0.1", features = ["server-auto", "service", "tokio"], optional = true }
+tower = { version = "0.5", features = ["util"], optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"], optional = true }
+futures-util = { version = "0.3", optional = true }
+clap = { version = "4", features = ["derive"] }
+base64 = "0.22"
+url = "2"
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
